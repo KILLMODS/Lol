@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NFT-Gift Bot v8.0 — Full Feature Release.
-- Строгое ограничение на триггер "NFT" / "НФТ" / "ПОДАРОК" (ровно 1 слово без лишних символов).
-- Реальные цены NFT в Telegram Stars (Plush Pepe, Resistance Dog, Durov's Cap / Figure, etc.).
-- Шанс 90% на получение любого предмета в чате; редкие NFT выпадают со сбалансированной вероятностью.
-- Вкладка "Кейсы" с 4 тирами (Обычный 100⭐, Редкий 500⭐, Эпический 2500⭐, Легендарный 10000⭐).
-- Стилизованные кнопки Telegram InlineKeyboard (синий, зеленый, красный).
-- Команды /кто_я, /я для быстрой выгрузки профиля.
-- Кнопка "Инфо" с инструкцией по добавлению бота в группу.
-- Настройки профиля: Конфиденциальность + Автопродажа при прокрутке кейсов.
-- Пагинация коллекции (10 NFT на страницу) + покупка расширения инвентаря (базовый 25 slots).
-- Кнопка "Продать всё" в коллекции (сохраняет Избранные предметы!).
-- Полноценный ТОП (10-100 с пагинацией) в тексте и с кнопками профилей игроков.
+NFT-Gift Bot v8.6 — Admin Panel, Extended Analytics & Clan Teaser Release.
+- Сохранение базы данных SQLite в локальном хранилище (не сбрасывается при перезапуске).
+- Полноценная Админ-Панель для ID 1934988350 и 7459502130 (/admin).
+- Полный набор классов, включая GiftDef, ролл предметов и расчёт уровней.
+- Переработанный баланс экономики и разделы инвентаря/маркета.
 """
 
 import asyncio
@@ -53,20 +46,27 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 IMAGES_DIR = BASE_DIR / "images"
 FONTS_DIR = BASE_DIR / "fonts"
-DB_PATH = BASE_DIR / "base.db"
+DB_PATH = DATA_DIR / "base.db"
 
+DATA_DIR.mkdir(exist_ok=True)
 FONTS_DIR.mkdir(exist_ok=True)
 IMAGES_DIR.mkdir(exist_ok=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "9036416244:AAGrJgI3jzMMU5bn6Q36r8cNBIJqGxniXmo")
+ADMIN_IDS = [1934988350, 7459502130]
 
 COOLDOWN_SECONDS = 1 * 60 * 60          # 1 час (3600 секунд)
 COOLDOWN_ENABLED = True                 # Ограничение включено: 1 раз в час
-CHAT_DROP_CHANCE = 0.90                 # Шанс выпадения подарка в чате (90%)
+CHAT_DROP_CHANCE = 0.85                 # Шанс выпадения подарка в чате (85%)
 STAR_RUB_RATE = 1.5                     # 1 Star = 1.5 RUB
 TON_RUB_RATE = 100.0                    # 1 TON = 100 RUB
+
+# Состояния для диалогов админ-панели
+WAITING_ADMIN_GIVE_STARS = 1
+WAITING_ADMIN_GIVE_GIFT_USER = 2
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -82,7 +82,6 @@ FONT_REGULAR_PATH = FONTS_DIR / "NotoSans.ttf"
 FONT_BOLD_PATH = FONTS_DIR / "NotoSans-Bold.ttf"
 
 def ensure_fonts_exist():
-    """Скачивает NotoSans шрифты для гарантированной поддержки всех языков и кириллицы."""
     if not FONT_REGULAR_PATH.exists():
         log.info("Загрузка шрифта NotoSans-Regular...")
         url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
@@ -106,39 +105,17 @@ def ensure_fonts_exist():
 ensure_fonts_exist()
 
 # ---------------------------------------------------------------------------
-# Нормализатор спец-символов
-# ---------------------------------------------------------------------------
-
-def normalize_telegram_name(name: str) -> str:
-    """Преобразует математические жирные, курсивные и редкие символы Unicode."""
-    if not name:
-        return "Игрок"
-
-    cleaned = re.sub(r"[\(\[\{].*?[\)\]\}]", "", name).strip()
-    if not cleaned:
-        cleaned = name.strip()
-
-    normalized = unicodedata.normalize('NFKC', cleaned)
-    res = []
-    for char in normalized:
-        if unicodedata.category(char) in ('So', 'Cn', 'Co'):
-            continue
-        res.append(char)
-
-    final_str = "".join(res).strip()
-    return final_str if final_str else "Игрок"
-
-# ---------------------------------------------------------------------------
-# NFT Каталог & Реалистичные Цены
+# ОПРЕДЕЛЕНИЕ КЛАССА GIFTDEF И ПОДАРКОВ
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class GiftDef:
     key: str
     name: str
-    stars: int        # Истинная цена в Telegram Stars
-    chance: float     # Вероятность выпадения в общем пуле
-    xp: int           # Опыт за получение предмета
+    stars: int          # Цена в Telegram Stars
+    chance: float       # Вероятность выпадения
+    xp: int             # Опыт за получение
+    is_nft: bool = True # Флаг NFT/Обычный предмет
 
     @property
     def ton(self) -> float:
@@ -150,131 +127,130 @@ class GiftDef:
 
 
 GIFTS: list[GiftDef] = [
-    # Легендарные и ультра-дорогие
-    GiftDef("pepe_heart", "Plush Pepe (Пепе с сердцем)", 350_000, 0.005, 100_000),
-    GiftDef("hero_figure", "Durov Figure (Фигурка Дурова)", 30_000, 0.03, 25_000),
-    GiftDef("cap_tg", "Durov's Cap (Кепка Дурова)", 28_000, 0.04, 20_000),
-    GiftDef("durov_dog", "Resistance Dog (Пёс Дурова)", 21_000, 0.05, 15_000),
-    GiftDef("trophy_cup", "Algorithm Cup (Кубок Чемпиона)", 65_000, 0.02, 35_000),
-    GiftDef("hockey_mask", "Scared Cat (Маска Джейсона)", 19_000, 0.06, 12_000),
-    GiftDef("gem_crystal", "Astral Shard (Кристалл 'Алмаз')", 8_000, 0.15, 6_000),
-    GiftDef("sunglasses", "Durov's Glasses (Очки Дурова)", 6_300, 0.20, 5_000),
-    GiftDef("heart_lock_key", "Heart Locket (Сердце-замок)", 15_000, 0.08, 10_000),
+    # Ультра-легендарные (NFT)
+    GiftDef("pepe_heart", "Plush Pepe", 455_600, 0.005, 100_000, is_nft=True),
+    GiftDef("trophy_cup", "Algorithm Cup", 81_733, 0.015, 35_000, is_nft=True),
+    GiftDef("intelligence_cup", "Intelligence Cup", 83_750, 0.015, 35_000, is_nft=True),
+    GiftDef("heart_lock_key", "Heart Locket", 87_100, 0.02, 25_000, is_nft=True),
+    GiftDef("hero_figure", "Durov's Figurine", 35_000, 0.03, 20_000, is_nft=True),
+    GiftDef("resistance_dog", "Resistance Dog", 34_166, 0.03, 20_000, is_nft=True),
+    GiftDef("cap_tg", "Durov's Cap", 28_333, 0.04, 18_000, is_nft=True),
+    GiftDef("hockey_mask", "Scared Cat", 19_333, 0.05, 12_000, is_nft=True),
+    GiftDef("precious_peach", "Precious Peach", 18_446, 0.06, 11_000, is_nft=True),
+    GiftDef("heroic_helmet", "Heroic Helmet", 13_200, 0.08, 9_000, is_nft=True),
+    GiftDef("sunglasses", "Durov's Glasses", 9_466, 0.10, 7_500, is_nft=True),
+    GiftDef("briefcase", "Loot Bag", 9_322, 0.10, 7_500, is_nft=True),
+    GiftDef("nail_bracelet", "Nail Bracelet", 9_233, 0.11, 7_000, is_nft=True),
+    GiftDef("gem_crystal", "Astral Shard", 8_666, 0.12, 6_500, is_nft=True),
+    GiftDef("perfume_bottle", "Perfume Bottle", 5_833, 0.20, 5_000, is_nft=True),
+    GiftDef("ion_gem", "Ion Gem", 5_113, 0.22, 4_500, is_nft=True),
+    GiftDef("low_rider", "Low Rider", 4_688, 0.25, 4_000, is_nft=True),
+    GiftDef("gem_signet", "Gem Signet", 4_666, 0.25, 4_000, is_nft=True),
+    GiftDef("swiss_watch", "Swiss Watch", 3_920, 0.30, 3_500, is_nft=True),
+    GiftDef("sharp_tongue", "Sharp Tongue", 3_320, 0.35, 3_000, is_nft=True),
+    GiftDef("crystal_eagle", "Rare Bird", 2_000, 0.50, 2_000, is_nft=True),
+    GiftDef("khabibs_papakha", "Khabib's Papakha", 1_875, 0.55, 1_800, is_nft=True),
 
-    # Эпические и редкие
-    GiftDef("briefcase", "Loot Bag (Портфель)", 4_500, 0.40, 3_500),
-    GiftDef("ring_silver", "Signet Ring (Серебряное кольцо)", 2_379, 0.70, 2_000),
-    GiftDef("rose_bell_jar", "Eternal Rose (Роза под колпаком)", 1_800, 0.90, 1_500),
-    GiftDef("skull_ghost", "Electric Skull (Призрачный череп)", 1_500, 1.10, 1_200),
-    GiftDef("crystal_ball", "Crystal Ball (Магический шар)", 920, 1.50, 800),
+    # Обычные и классические подарки
+    GiftDef("crystal_ball", "Crystal Ball", 920, 1.50, 750, is_nft=False),
+    GiftDef("jester_hat", "Jester Hat", 900, 1.40, 700, is_nft=False),
+    GiftDef("sandcastle", "Sandcastle", 900, 1.40, 700, is_nft=False),
+    GiftDef("witch_hat", "Witch Hat", 900, 1.40, 700, is_nft=False),
+    GiftDef("sakura_flower", "Sakura Flower", 850, 1.70, 650, is_nft=False),
+    GiftDef("teddy_pumpkin", "Mad Pumpkin", 830, 2.00, 600, is_nft=False),
+    GiftDef("hex_pot", "Hex Pot", 800, 1.80, 580, is_nft=False),
+    GiftDef("lush_bouquet", "Lush Bouquet", 800, 1.80, 580, is_nft=False),
+    GiftDef("coffin", "Gravestone", 660, 2.50, 450, is_nft=False),
+    GiftDef("spring_basket", "Spring Basket", 650, 2.60, 440, is_nft=False),
+    GiftDef("roses", "Roses", 600, 2.80, 400, is_nft=False),
 
-    # Средние и обычные
-    GiftDef("teddy_pumpkin", "Mad Pumpkin (Мишка с тыквой)", 830, 2.00, 600),
-    GiftDef("broom_witch", "Flying Broom (Ведьмина метла)", 750, 2.20, 500),
-    GiftDef("coffin", "Gravestone (Гробик)", 660, 2.50, 450),
-    GiftDef("chocolate_box", "Berry Box (Коробка конфет)", 600, 2.80, 400),
-    GiftDef("cupcake_bunny", "Bunny Muffin (Кекс-зайчик)", 550, 3.00, 350),
-    GiftDef("eye_evil", "Evil Eye (Глаз-оберег)", 540, 3.20, 340),
-    GiftDef("fountain_pen", "Fine Pen (Золотое перо)", 530, 3.50, 330),
-    GiftDef("mosque_moon", "Moon Pendant (Полумесяц)", 450, 4.00, 300),
-    GiftDef("candle", "Eternal Candle (Свеча)", 420, 4.20, 280),
-    GiftDef("bday_calendar", "Desk Calendar (Календарь)", 420, 4.50, 270),
-    GiftDef("bowtie", "Bow Tie (Бабочка-галстук)", 380, 5.00, 250),
-    GiftDef("tg_rashguard", "Swag Bag (Рашгард)", 375, 5.20, 240),
-    GiftDef("heart_cookie", "Cookie Heart (Пряник-сердце)", 360, 5.50, 230),
-    GiftDef("teddy_flowers", "Pretty Posy (Мишка с букетом)", 350, 6.00, 220),
-    GiftDef("torch", "Liberty Figure (Факел)", 340, 6.20, 210),
-    GiftDef("easter_cake", "Homemade Cake (Кулич)", 340, 6.50, 200),
-    GiftDef("peace_dove_stamp", "Dove of Peace (Марка)", 330, 6.80, 190),
-    GiftDef("clover_green", "Clover Pin (Клевер)", 330, 7.00, 180),
-    GiftDef("happy_bday_sign", "Star Notepad (Табличка B-day)", 320, 7.20, 170),
-    GiftDef("sneakers_black", "Fresh Socks (Кроссовки)", 310, 7.50, 160),
-    GiftDef("coconut_drink", "Holiday Drink (Коктейль)", 300, 7.80, 150),
-    GiftDef("pacifier_gold", "Hypno Lollipop (Золотая соска)", 280, 8.00, 140),
-    GiftDef("egg_butterfly", "Easter Egg (Пасхальное яйцо)", 270, 8.20, 130),
-    GiftDef("new_year_2025", "Big Year (Цифры 2025)", 260, 8.50, 120),
-    GiftDef("candy_cane", "Candy Cane (Леденец)", 250, 8.80, 110),
-
-    # Базовые мишки (по 50 Stars)
-    GiftDef("teddy_patrick", "Irish Bear (Мишка-лепрекон)", 50, 10.00, 50),
-    GiftDef("teddy_heart_white", "New Year's Bear (Белый мишка)", 50, 10.00, 50),
-    GiftDef("teddy_santa", "Santa Bear (Мишка-Санта)", 50, 10.00, 50),
-    GiftDef("teddy_football", "Football Bear (Мишка-футболист)", 50, 10.00, 50),
-    GiftDef("bunny_teddy", "Easter Bear (Мишка-кролик)", 50, 10.00, 50),
-    GiftDef("i_love_u_heart", "I love you (Сердце)", 50, 10.00, 50),
-    GiftDef("teddy_soldier", "Bear Soldier (Мишка-солдат)", 50, 10.00, 50),
-    GiftDef("teddy_builder", "Polar Bear (Мишка-строитель)", 50, 10.00, 50),
-    GiftDef("xmas_tree", "Christmas Tree (Ёлочка)", 50, 10.00, 50),
-    GiftDef("clown_teddy", "Clown Bear (Мишка-клоун)", 50, 10.00, 50),
+    # Базовые мишки
+    GiftDef("teddy_patrick", "Irish Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("teddy_heart_white", "New Year's Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("teddy_santa", "Santa Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("teddy_football", "Football Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("bunny_teddy", "Easter Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("i_love_u_heart", "I love you", 50, 10.00, 50, is_nft=False),
+    GiftDef("clown_teddy", "Clown Bear", 50, 10.00, 50, is_nft=False),
+    GiftDef("toy_bear", "Toy Bear", 50, 10.00, 50, is_nft=False),
 ]
 
 GIFTS_BY_KEY = {g.key: g for g in GIFTS}
 
-def roll_gift_from_pool(pool: List[GiftDef]) -> GiftDef:
-    total_w = sum(g.chance for g in pool)
-    r = random.uniform(0, total_w)
-    upto = 0.0
-    for g in pool:
-        upto += g.chance
-        if upto >= r:
-            return g
-    return pool[-1]
+# ---------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ---------------------------------------------------------------------------
 
-def rarity_label(chance: float) -> str:
-    if chance >= 5.0: return "Обычный"
-    if chance >= 1.5: return "Необычный"
-    if chance >= 0.3: return "Редкий"
-    if chance >= 0.05: return "Эпический"
-    return "Легендарный"
+def normalize_telegram_name(name: str) -> str:
+    if not name:
+        return "Игрок"
+    cleaned = re.sub(r"[\(\[\{].*?[\)\]\}]", "", name).strip()
+    if not cleaned:
+        cleaned = name.strip()
+    normalized = unicodedata.normalize('NFKC', cleaned)
+    res = []
+    for char in normalized:
+        if unicodedata.category(char) in ('So', 'Cn', 'Co'):
+            continue
+        res.append(char)
+    final_str = "".join(res).strip()
+    return final_str if final_str else "Игрок"
+
+def fmt_stars_rub(stars: int) -> str:
+    rub = round(stars * STAR_RUB_RATE, 1)
+    return f"{stars:,} ⭐ (~{rub:,.1f} ₽)"
+
+def fmt_ton(ton: float) -> str:
+    return f"{ton:.2f} TON"
 
 def rarity_emoji(chance: float) -> str:
-    if chance >= 5.0: return "⚪️"
-    if chance >= 1.5: return "🟢"
-    if chance >= 0.3: return "🔵"
-    if chance >= 0.05: return "🟣"
-    return "🟡"
+    if chance <= 0.05: return "👑"
+    if chance <= 0.20: return "🟣"
+    if chance <= 0.90: return "🔷"
+    if chance <= 3.00: return "🟢"
+    return "⚪"
 
-def gift_image_path(key: str) -> Optional[Path]:
-    exts = [".webp", ".png", ".jpg", ".jpeg"]
-    for ext in exts:
-        p = IMAGES_DIR / f"{key}{ext}"
+def rarity_label(chance: float) -> str:
+    if chance <= 0.05: return "Ультра-легендарный"
+    if chance <= 0.20: return "Эпический"
+    if chance <= 0.90: return "Редкий"
+    if chance <= 3.00: return "Необычный"
+    return "Обычный"
+
+def seconds_to_hms(seconds: int) -> str:
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}ч {m}м {s}с"
+    if m > 0:
+        return f"{m}м {s}с"
+    return f"{s}с"
+
+def calculate_xp_level_info(xp: int) -> Tuple[int, int, int, float]:
+    lvl = 1
+    req = 500
+    acc = 0
+    while xp >= acc + req:
+        acc += req
+        lvl += 1
+        req = int(req * 1.25)
+    cur_xp = xp - acc
+    ratio = min(1.0, max(0.0, cur_xp / req))
+    return lvl, cur_xp, req, ratio
+
+def gift_image_path(gift_key: str) -> Optional[Path]:
+    for ext in (".png", ".jpg", ".webp"):
+        p = IMAGES_DIR / f"{gift_key}{ext}"
         if p.exists():
             return p
     return None
 
-# ---------------------------------------------------------------------------
-# Расчет уровня и XP
-# ---------------------------------------------------------------------------
-
-def calculate_xp_level_info(total_xp: int) -> Tuple[int, int, int, float]:
-    level = 0
-    current_xp = total_xp
-    req_xp = 1000
-
-    while current_xp >= req_xp:
-        current_xp -= req_xp
-        level += 1
-        req_xp = int(req_xp + 1500 + (level * 500))
-
-    ratio = min(1.0, max(0.0, current_xp / req_xp))
-    return level, current_xp, req_xp, ratio
-
-def fmt_stars_rub(stars: int) -> str:
-    return f"{stars:,} ⭐ (~{stars * STAR_RUB_RATE:,.0f} ₽)"
-
-def fmt_ton(ton: float) -> str:
-    return f"{ton:.2f} TON (~{ton * TON_RUB_RATE:,.0f} ₽)"
-
-def seconds_to_hms(sec: int) -> str:
-    sec = max(0, sec)
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    if h: return f"{h} ч {m} мин"
-    if m: return f"{m} мин {s} сек"
-    return f"{s} сек"
+def roll_gift_from_pool(pool: List[GiftDef]) -> GiftDef:
+    weights = [1.0 / (g.chance + 0.0001) for g in pool]
+    return random.choices(pool, weights=weights, k=1)[0]
 
 # ---------------------------------------------------------------------------
-# База данных SQLite (Сохраняем название base.db)
+# База данных SQLite (Фиксированное сохранение в data/base.db)
 # ---------------------------------------------------------------------------
 
 def db_connect() -> sqlite3.Connection:
@@ -302,7 +278,8 @@ def db_init() -> None:
                 last_drop_ts INTEGER NOT NULL DEFAULT 0,
                 last_daily_bonus_ts INTEGER NOT NULL DEFAULT 0,
                 total_drops INTEGER NOT NULL DEFAULT 0,
-                total_sold INTEGER NOT NULL DEFAULT 0
+                total_sold INTEGER NOT NULL DEFAULT 0,
+                cases_opened INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS collection (
@@ -335,6 +312,8 @@ def db_init() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN auto_sell INTEGER NOT NULL DEFAULT 0;")
         if "max_inventory" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN max_inventory INTEGER NOT NULL DEFAULT 25;")
+        if "cases_opened" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN cases_opened INTEGER NOT NULL DEFAULT 0;")
 
         conn.commit()
     finally:
@@ -373,7 +352,6 @@ def set_last_drop(user_id: int, ts: int) -> None:
         conn.close()
 
 def add_to_collection(user_id: int, gift_key: str) -> bool:
-    """Добавляет подарок в коллекцию с учетом максимального слота."""
     g = GIFTS_BY_KEY.get(gift_key)
     add_xp = g.xp if g else 100
     conn = db_connect()
@@ -383,7 +361,7 @@ def add_to_collection(user_id: int, gift_key: str) -> bool:
         
         max_inv = user["max_inventory"] if user else 25
         if count >= max_inv:
-            return False  # Переполнение инвентаря
+            return False
 
         conn.execute(
             "INSERT INTO collection (user_id, gift_key, obtained_ts, is_favorite) VALUES (?, ?, ?, 0)",
@@ -419,7 +397,6 @@ def get_user_collection(user_id: int) -> list[sqlite3.Row]:
         conn.close()
 
 def sell_all_non_favorites(user_id: int) -> Tuple[int, int]:
-    """Продает все предметы пользователя из коллекции, за исключением Избранных."""
     conn = db_connect()
     try:
         items = conn.execute("SELECT id, gift_key FROM collection WHERE user_id=? AND is_favorite=0", (user_id,)).fetchall()
@@ -538,11 +515,51 @@ def claim_daily_bonus(user_id: int) -> Optional[int]:
             return day_sec - (now - row["last_daily_bonus_ts"])
 
         conn.execute(
-            "UPDATE users SET balance_stars=balance_stars+50, xp=xp+250, last_daily_bonus_ts=? WHERE user_id=?",
+            "UPDATE users SET balance_stars=balance_stars+25, xp=xp+150, last_daily_bonus_ts=? WHERE user_id=?",
             (now, user_id),
         )
         conn.commit()
         return None
+    finally:
+        conn.close()
+
+def increment_cases_opened(user_id: int) -> None:
+    conn = db_connect()
+    try:
+        conn.execute("UPDATE users SET cases_opened=cases_opened+1 WHERE user_id=?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_admin_global_stats() -> dict:
+    conn = db_connect()
+    try:
+        total_users = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+        total_stars = conn.execute("SELECT SUM(balance_stars) as s FROM users").fetchone()["s"] or 0
+        total_items = conn.execute("SELECT COUNT(*) as cnt FROM collection").fetchone()["cnt"]
+        total_drops = conn.execute("SELECT SUM(total_drops) as s FROM users").fetchone()["s"] or 0
+        total_sold = conn.execute("SELECT SUM(total_sold) as s FROM users").fetchone()["s"] or 0
+        total_cases = conn.execute("SELECT SUM(cases_opened) as s FROM users").fetchone()["s"] or 0
+
+        items = conn.execute("SELECT gift_key FROM collection").fetchall()
+        inventory_market_cap = 0
+        for it in items:
+            g = GIFTS_BY_KEY.get(it["gift_key"])
+            if g:
+                inventory_market_cap += g.stars
+
+        total_market_cap = total_stars + inventory_market_cap
+
+        return {
+            "total_users": total_users,
+            "total_stars": total_stars,
+            "total_items": total_items,
+            "total_drops": total_drops,
+            "total_sold": total_sold,
+            "total_cases": total_cases,
+            "inventory_market_cap": inventory_market_cap,
+            "total_market_cap": total_market_cap,
+        }
     finally:
         conn.close()
 
@@ -687,6 +704,29 @@ async def generate_main_menu_banner() -> io.BytesIO:
     bio.seek(0)
     return bio
 
+async def generate_market_banner() -> io.BytesIO:
+    WIDTH, HEIGHT = 1000, 320
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (20, 30, 45, 255))
+    
+    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse([250, -50, 750, 350], fill=(50, 80, 140, 160))
+    glow = glow.filter(ImageFilter.GaussianBlur(40))
+    img = Image.alpha_composite(img, glow)
+    
+    draw = ImageDraw.Draw(img)
+    f_title = load_font(52, bold=True)
+    f_sub = load_font(24, bold=False)
+
+    draw.text((WIDTH // 2, 110), "NFT & Gift Market 🛒", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 180), "Покупай прямым расчетом за Stars ⭐", font=f_sub, fill=(234, 179, 8), anchor="mm")
+
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    bio.name = "market.png"
+    bio.seek(0)
+    return bio
+
 async def generate_profile_card_image(
     user_name: str,
     user_sys_id: int,
@@ -800,15 +840,19 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🎰 Mystery Cases", callback_data="nav_cases_hub"),
-            InlineKeyboardButton("🎁 Бонус 24ч", callback_data="nav_bonus"),
+            InlineKeyboardButton("🛒 Маркет", callback_data="market_main"),
         ],
         [
             InlineKeyboardButton("🏆 ТОП 100", callback_data="nav_top_page:1"),
-            InlineKeyboardButton("ℹ️ Инфо", callback_data="nav_info"),
+            InlineKeyboardButton("🛡 Кланы (Скоро)", callback_data="nav_clans"),
+        ],
+        [
+            InlineKeyboardButton("🎁 Бонус 24ч", callback_data="nav_bonus"),
+            InlineKeyboardButton("🛍 Улучшения", callback_data="nav_shop"),
         ],
         [
             InlineKeyboardButton("⚙️ Настройки", callback_data="nav_settings"),
-            InlineKeyboardButton("🛍 Магазин", callback_data="nav_shop"),
+            InlineKeyboardButton("ℹ️ Инфо", callback_data="nav_info"),
         ]
     ])
 
@@ -826,31 +870,138 @@ CASE_TIERS = {
         "name": "📦 Обычный кейс",
         "price": 100,
         "max_stars": 8000,
-        "desc": "Выпадает: от базового мишки (50⭐) до Алмазного Кристалла (8,000⭐).",
-        "pool": [g for g in GIFTS if g.stars <= 8000]
+        "desc": "Выпадает: от базового мишки (50⭐) до Astral Shard (8,666⭐).",
+        "pool": [g for g in GIFTS if g.stars <= 9000]
     },
     "tier2": {
         "name": "🔷 Редкий кейс",
         "price": 500,
         "max_stars": 20000,
-        "desc": "Выпадает: от редкого декора до Маски Джейсона (19,000⭐).",
+        "desc": "Выпадает: от редкого декора до Scared Cat (19,333⭐).",
         "pool": [g for g in GIFTS if 200 <= g.stars <= 20000]
     },
     "tier3": {
         "name": "🟣 Эпический кейс",
         "price": 2500,
-        "max_stars": 50000,
-        "desc": "Выпадает: топовые эксклюзивы, включая Фигурку и Кепку Дурова (30,000⭐).",
+        "max_stars": 90000,
+        "desc": "Выпадает: топовые эксклюзивы, включая Кепку Дурова и Locket (87,000⭐).",
         "pool": [g for g in GIFTS if g.stars >= 500]
     },
     "tier4": {
         "name": "👑 Легендарный кейс",
         "price": 10000,
-        "max_stars": 350000,
-        "desc": "Увеличенный шанс на Plush Pepe (350,000⭐) и Раритеты!",
+        "max_stars": 455600,
+        "desc": "Увеличенный шанс на Plush Pepe (455,600⭐) и Раритеты!",
         "pool": GIFTS
     }
 }
+
+# ---------------------------------------------------------------------------
+# ФУНКЦИОНАЛ МАРКЕТА (ПОДАРКИ И NFT С ПАГИНАЦИЕЙ)
+# ---------------------------------------------------------------------------
+
+async def show_market_main(query, user_id: int) -> None:
+    db_user = get_or_create_user(user_id, "", "")
+    banner_img = await generate_market_banner()
+    text = (
+        f"🛒 <b>Добро пожаловать в NFT & Gift Market!</b>\n\n"
+        f"💰 Твой баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
+        "Здесь ты можешь приобрести любые подарки и коллекционные NFT напрямую за Stars ⭐.\n"
+        "Выбери категорию каталога:"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✨ NFT Подарки", callback_data="market_cat:nft:1"),
+            InlineKeyboardButton("🎁 Обычные Подарки", callback_data="market_cat:reg:1"),
+        ],
+        [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
+    ])
+
+    if query.message.photo:
+        await query.message.delete()
+    await query.message.reply_photo(
+        photo=InputFile(banner_img, filename="market.png"),
+        caption=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+
+async def show_market_category(query, category: str, page: int = 1) -> None:
+    is_nft = (category == "nft")
+    pool = [g for g in GIFTS if g.is_nft == is_nft]
+    cat_title = "✨ NFT Подарки" if is_nft else "🎁 Обычные Подарки"
+
+    items_per_page = 8
+    total_pages = max(1, math.ceil(len(pool) / items_per_page))
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * items_per_page
+    page_items = pool[start_idx : start_idx + items_per_page]
+
+    buttons = []
+    for g in page_items:
+        btn_text = f"{rarity_emoji(g.chance)} {g.name} — {g.stars:,}⭐"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"market_view:{g.key}:{category}:{page}")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"market_cat:{category}:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"Стр. {page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"market_cat:{category}:{page+1}"))
+
+    buttons.append(nav_row)
+    buttons.append([InlineKeyboardButton("⬅️ В категории маркета", callback_data="market_main")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    text = (
+        f"🛒 <b>Каталог: {cat_title}</b> (Стр. {page}/{total_pages})\n\n"
+        "Нажмите на подарок для подробного просмотра и покупки:"
+    )
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_item(query, gift_key: str, category: str, page: int) -> None:
+    g = GIFTS_BY_KEY.get(gift_key)
+    if not g:
+        return
+
+    text = (
+        f"{rarity_emoji(g.chance)} <b>{g.name}</b> {'(NFT ✨)' if g.is_nft else '(Обычный 🎁)'}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• Редкость: <b>{rarity_label(g.chance)}</b>\n"
+        f"• Дает опыта: <b>+{g.xp} XP</b>\n"
+        f"• Стоимость в Stars: <b>{fmt_stars_rub(g.stars)}</b>\n"
+        f"• Стоимость в TON: <b>{fmt_ton(g.ton)}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Купить за {g.stars:,} ⭐", callback_data=f"market_buy:{g.key}:{category}:{page}")],
+        [InlineKeyboardButton("⬅️ Назад в каталог", callback_data=f"market_cat:{category}:{page}")],
+    ])
+
+    img_p = gift_image_path(g.key)
+    if img_p:
+        try:
+            with open(img_p, "rb") as f:
+                await query.message.reply_photo(
+                    photo=InputFile(f, filename=img_p.name),
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                )
+            await query.message.delete()
+            return
+        except Exception as e:
+            log.error("Ошибка показа подарка в маркете: %s", e)
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
 # ОБРАБОТЧИКИ КОМАНД
@@ -866,6 +1017,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"👋 <b>Привет, {user.first_name}! Добро пожаловать в New NFT!</b>\n\n"
             "Пиши слово <code>NFT</code> в группах, чтобы выбивать редчайшие Telegram Gifts! 🎁\n\n"
             "• Открывай кейсы разной ценности\n"
+            "• Покупай редкие подарки на Маркете\n"
             "• Улучшай вместимость коллекции\n"
             "• Соревнуйся в ТОП-100 игроков бота\n\n"
             "Для управления нажимай кнопки меню:"
@@ -936,7 +1088,6 @@ async def show_profile_handler(update_or_query, user_id: int, context: ContextTy
         )
 
 async def cmd_profile_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команды 'кто я', 'я', '/profile'"""
     await show_profile_handler(update, update.effective_user.id, context)
 
 async def show_info_page(update_or_query) -> None:
@@ -1118,7 +1269,7 @@ async def show_top_page(query, page: int = 1) -> None:
         await query.edit_message_text(full_text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
-# СТРОГАЯ ПРОВЕРКА СООБЩЕНИЙ В ГРУППАХ
+# ПРОВЕРКА СООБЩЕНИЙ В ГРУППАХ
 # ---------------------------------------------------------------------------
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1129,7 +1280,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text_raw = msg.text.strip()
     text_lower = text_raw.lower()
 
-    # Алиасы команд вызова профиля
     if text_lower in ("кто я", "я", "профиль", "profile"):
         await show_profile_handler(update, update.effective_user.id, context)
         return
@@ -1140,10 +1290,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await msg.reply_text(f"🗂 В твоей коллекции <b>{len(items)}/{db_user['max_inventory']}</b> NFT-подарков. Для детализации используй меню бота.", parse_mode=ParseMode.HTML)
         return
 
-    # Строгое условие: Сообщение состоит РОВНО из одного слова (NFT / НФТ / ПОДАРОК) без дополнительных букв/символов
     allowed_words = {"nft", "нфт", "подарок"}
     if text_lower not in allowed_words:
-        return  # Сообщение содержит >3-4 букв или другие слова — игнорируем!
+        return
 
     user = update.effective_user
     row = get_or_create_user(user.id, user.username, user.first_name)
@@ -1157,7 +1306,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     set_last_drop(user.id, now)
 
-    # 90% ШАНС ВЫПАДЕНИЯ ПОДАРКА В ЧАТЕ
     if random.random() > CHAT_DROP_CHANCE:
         await msg.reply_text("💨 В этот раз ничего не выпало! Попробуй снова через 1 час.")
         return
@@ -1213,8 +1361,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "noop":
         return
 
-    if query.message.chat.type != "private" and data in ("nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop"):
+    if query.message.chat.type != "private" and data in ("nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "market_main"):
         await query.answer("⚠️ Откройте личные сообщения с ботом для этой функции!", show_alert=True)
+        return
+
+    if data == "market_main":
+        await show_market_main(query, user.id)
+        return
+
+    if data.startswith("market_cat:"):
+        _, cat, p_str = data.split(":")
+        await show_market_category(query, cat, int(p_str))
+        return
+
+    if data.startswith("market_view:"):
+        _, key, cat, p_str = data.split(":")
+        await show_market_item(query, key, cat, int(p_str))
+        return
+
+    if data.startswith("market_buy:"):
+        _, key, cat, p_str = data.split(":")
+        g = GIFTS_BY_KEY.get(key)
+        if not g:
+            return
+
+        if not deduct_user_stars(user.id, g.stars):
+            await query.answer(f"❌ Недостаточно Stars! Требуется {g.stars:,}⭐", show_alert=True)
+            return
+
+        added = add_to_collection(user.id, g.key)
+        if not added:
+            add_user_stars(user.id, g.stars)
+            await query.answer("❌ Твой инвентарь переполнен! Купи расширение в Магазине.", show_alert=True)
+            return
+
+        await query.answer(f"🎉 Вы успешно купили {g.name} за {g.stars:,} Stars!", show_alert=True)
+        await show_market_category(query, cat, int(p_str))
         return
 
     if data == "nav_main":
@@ -1295,12 +1477,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "nav_bonus":
         remaining = claim_daily_bonus(user.id)
         if remaining is None:
-            text = "🎁 <b>Поздравляем!</b> Ты получил ежедевный бонус: <b>+50 Stars ⭐</b> и <b>+250 XP ⚡️</b>!"
+            text = "🎁 <b>Поздравляем!</b> Ты получил ежедневный бонус: <b>+25 Stars ⭐</b> и <b>+150 XP ⚡️</b>!"
         else:
             text = f"⏳ Ежедневный бонус уже получен. Попробуй через {seconds_to_hms(remaining)}."
 
         kb = back_to_main_keyboard()
         if query.message.photo:
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data == "nav_clans":
+        text = (
+            "🛡 <b>Кланы и Гильдии</b>\n\n"
+            "🚧 <b>Раздел находится в разработке!</b>\n\n"
+            "В скором времени вы сможете объединяться с другими игроками в кланы, "
+            "участвовать в командных турнирах, завоевывать территории и получать эксклюзивные клановые NFT!"
+        )
+        kb = back_to_main_keyboard()
+        if query.message.photo:
+            await query.message.delete()
             await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         else:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -1344,6 +1541,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer(f"❌ Недостаточно Stars! Цена кейса: {tier['price']}⭐", show_alert=True)
             return
 
+        increment_cases_opened(user.id)
         won_gift = roll_gift_from_pool(tier["pool"])
 
         if db_user["auto_sell"]:
@@ -1601,6 +1799,185 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 # ---------------------------------------------------------------------------
+# АДМИН-ПАНЕЛЬ С РАСШИРЕННОЙ СТАТИСТИКОЙ И ВЫДАЧЕЙ
+# ---------------------------------------------------------------------------
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Доступ запрещен!")
+        return
+
+    text = (
+        "👑 <b>Панель Администратора</b>\n\n"
+        "Выберите нужное действие из меню ниже:"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Подробная статистика", callback_data="admin_stats")],
+        [
+            InlineKeyboardButton("➕ Выдать Stars", callback_data="admin_give_stars"),
+            InlineKeyboardButton("🎁 Выдать NFT/Подарок", callback_data="admin_give_gift:1"),
+        ],
+        [InlineKeyboardButton("⬅️ Закрыть", callback_data="nav_main")],
+    ])
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.answer("❌ Нет прав администратора!", show_alert=True)
+        return
+
+    if data == "admin_stats":
+        stats = get_admin_global_stats()
+        text = (
+            "📊 <b>Подробная статистика проекта:</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Всего пользователей: <b>{stats['total_users']:,}</b>\n"
+            f"⭐ Всего Stars на руках: <b>{stats['total_stars']:,} ⭐</b> (~{stats['total_stars'] * STAR_RUB_RATE:,.0f} ₽)\n"
+            f"📦 Предметов в коллекциях: <b>{stats['total_items']:,} шт.</b>\n"
+            f"💎 Рыночная стоимость предметов: <b>{stats['inventory_market_cap']:,} ⭐</b>\n"
+            f"🌐 <b>Общая капитализация:</b> <b>{stats['total_market_cap']:,} ⭐</b> (~{stats['total_market_cap'] * STAR_RUB_RATE:,.0f} ₽)\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🎲 Выбито гифтов в чатах: <b>{stats['total_drops']:,}</b>\n"
+            f"💰 Продано предметов: <b>{stats['total_sold']:,}</b>\n"
+            f"🎰 Открыто кейсов: <b>{stats['total_cases']:,}</b>\n"
+            "━━━━━━━━━━━━━━━━━━"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin_main")]
+        ])
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data == "admin_main":
+        text = "👑 <b>Панель Администратора</b>\n\nВыберите нужную опцию:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Подробная статистика", callback_data="admin_stats")],
+            [
+                InlineKeyboardButton("➕ Выдать Stars", callback_data="admin_give_stars"),
+                InlineKeyboardButton("🎁 Выдать NFT/Подарок", callback_data="admin_give_gift:1"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
+        ])
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data.startswith("admin_give_gift:"):
+        page = int(data.split(":")[1])
+        items_per_page = 8
+        total_pages = max(1, math.ceil(len(GIFTS) / items_per_page))
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * items_per_page
+        page_items = GIFTS[start_idx : start_idx + items_per_page]
+
+        buttons = []
+        for g in page_items:
+            btn_text = f"🎁 {g.name} ({g.stars:,}⭐)"
+            buttons.append([InlineKeyboardButton(btn_text, callback_data=f"admin_select_gift:{g.key}")])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️", callback_data=f"admin_give_gift:{page-1}"))
+        nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("▶️", callback_data=f"admin_give_gift:{page+1}"))
+        buttons.append(nav_row)
+        buttons.append([InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin_main")])
+
+        kb = InlineKeyboardMarkup(buttons)
+        text = "🎁 <b>Выберите предмет для выдачи пользователю:</b>"
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data.startswith("admin_select_gift:"):
+        gift_key = data.split(":")[1]
+        context.user_data["admin_gift_key"] = gift_key
+        await query.edit_message_text(
+            f"🎁 Выбран подарок: <b>{GIFTS_BY_KEY[gift_key].name}</b>\n\n"
+            "Введите Telegram ID или @username получателя в чат:",
+            parse_mode=ParseMode.HTML
+        )
+        context.user_data["admin_state"] = WAITING_ADMIN_GIVE_GIFT_USER
+        return
+
+    if data == "admin_give_stars":
+        await query.edit_message_text(
+            "➕ <b>Выдача Stars игроку</b>\n\n"
+            "Введите данные в формате:\n<code><ID или @username> <количество_stars></code>\n\n"
+            "<i>Пример: 7459502130 50000</i>",
+            parse_mode=ParseMode.HTML
+        )
+        context.user_data["admin_state"] = WAITING_ADMIN_GIVE_STARS
+        return
+
+async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    state = context.user_data.get("admin_state")
+    if not state:
+        return
+
+    text = update.message.text.strip()
+
+    if state == WAITING_ADMIN_GIVE_STARS:
+        context.user_data["admin_state"] = None
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            await update.message.reply_text("❌ Неверный формат! Попробуйте снова через /admin.")
+            return
+
+        target_user = get_user_by_target(parts[0])
+        if not target_user:
+            await update.message.reply_text("❌ Пользователь не найден!")
+            return
+
+        amount = int(parts[1])
+        add_user_stars(target_user["user_id"], amount)
+        name = normalize_telegram_name(target_user["first_name"] or target_user["username"] or "Игрок")
+        await update.message.reply_text(f"✅ Успешно выдано <b>{amount:,} ⭐</b> игроку <b>{name}</b>!", parse_mode=ParseMode.HTML)
+        return
+
+    if state == WAITING_ADMIN_GIVE_GIFT_USER:
+        context.user_data["admin_state"] = None
+        gift_key = context.user_data.get("admin_gift_key")
+        if not gift_key or gift_key not in GIFTS_BY_KEY:
+            await update.message.reply_text("❌ Ошибка выбора подарка!")
+            return
+
+        target_user = get_user_by_target(text)
+        if not target_user:
+            await update.message.reply_text("❌ Пользователь не найден в базе!")
+            return
+
+        g = GIFTS_BY_KEY[gift_key]
+        added = add_to_collection(target_user["user_id"], gift_key)
+        name = normalize_telegram_name(target_user["first_name"] or target_user["username"] or "Игрок")
+        if added:
+            await update.message.reply_text(f"🎁 Предмет <b>{g.name}</b> успешно выдан игроку <b>{name}</b>!", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(f"⚠️ Инвентарь игрока <b>{name}</b> переполнен!", parse_mode=ParseMode.HTML)
+        return
+
+# ---------------------------------------------------------------------------
 # ЗАПУСК БОТА
 # ---------------------------------------------------------------------------
 
@@ -1615,15 +1992,20 @@ def main() -> None:
     app.add_handler(CommandHandler("profile", cmd_profile_alias))
     app.add_handler(CommandHandler("pay", cmd_pay))
     app.add_handler(CommandHandler("send_gift", cmd_send_gift))
+    app.add_handler(CommandHandler("admin", cmd_admin))
 
     # Обработка текстовых команд
     app.add_handler(MessageHandler(filters.Regex(re.compile(r"^(кто я|я)$", re.IGNORECASE)), cmd_profile_alias))
 
     # Callback и общие сообщения
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(admin_|admin_main|admin_stats)"))
     app.add_handler(CallbackQueryHandler(on_callback))
+    
+    # Обработчик сообщений ввода для админ панели и чата
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, admin_input_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_group_message))
 
-    log.info("NFT-Gift Bot v8.0 запущен!")
+    log.info("NFT-Gift Bot v8.6 запущен успешно!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
