@@ -44,6 +44,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 # ---------------------------------------------------------------------------
 # Настройки и глобальные пути
@@ -62,11 +63,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "9036416244:AAGrJgI3jzMMU5bn6Q36r8cNBIJq
 COOLDOWN_SECONDS = 1 * 60 * 60          # 1 час
 COOLDOWN_ENABLED = True
 CHAT_DROP_CHANCE = 0.90                 # 90%
-STAR_RUB_RATE = 1.5
-TON_RUB_RATE = 100.0
-
-CLAN_CREATE_LEVEL_REQ = 10
-CLAN_CREATE_COST = 100_000
+ADMIN_IDS = {684535319}  # Укажите Telegram ID администраторов
 
 # FSM Состояния создания и настройки клана
 (
@@ -75,7 +72,11 @@ CLAN_CREATE_COST = 100_000
     WAIT_CLAN_DESC,
     WAIT_CLAN_TYPE,
     WAIT_CLAN_FEE,
-) = range(5)
+    WAIT_ADMIN_GIVE_STARS_USER,
+    WAIT_ADMIN_GIVE_STARS_AMOUNT,
+    WAIT_ADMIN_GIVE_NFT_USER,
+    WAIT_ADMIN_GIVE_NFT_KEY,
+) = range(9)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -953,11 +954,8 @@ async def generate_profile_card_image(
     return bio
 
 # ---------------------------------------------------------------------------
-# КЛАВИАТУРЫ ТЕЛЕГРАМ
-# ---------------------------------------------------------------------------
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
+    buttons = [
         [
             InlineKeyboardButton("👤 Профиль", callback_data="nav_profile"),
             InlineKeyboardButton("🗂 Коллекция", callback_data="nav_collection_page:1"),
@@ -974,7 +972,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚙️ Настройки", callback_data="nav_settings"),
             InlineKeyboardButton("🛍 Магазин", callback_data="nav_shop"),
         ]
-    ])
+    ]
+    if user_id in ADMIN_IDS:
+        buttons.append([InlineKeyboardButton("👑 Админ-Панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(buttons)
 
 def back_to_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -1027,7 +1028,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Для управления нажимай кнопки меню:"
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_keyboard()
+        reply_markup=main_menu_keyboard(user.id)
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1089,129 +1090,218 @@ async def show_profile_handler(update_or_query, user_id: int, context: ContextTy
             photo=InputFile(card_img, filename="profile.png"),
             caption=caption,
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(user_id),
         )
     else:
         await update_or_query.reply_photo(
             photo=InputFile(card_img, filename="profile.png"),
             caption=caption,
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(user_id),
         )
 
 async def cmd_profile_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await show_profile_handler(update, update.effective_user.id, context)
 
 # ---------------------------------------------------------------------------
-# СИСТЕМА КЛАНОВ (Логика и Интерфейс)
+# АДМИН-ПАНЕЛЬ И СТАТИСТИКА
 # ---------------------------------------------------------------------------
 
-async def show_clans_hub(query, user_id: int) -> None:
-    user = query.from_user
-    db_user = get_or_create_user(user_id, user.username, user.first_name)
-    clan = get_user_clan(user_id)
+async def show_admin_panel(query) -> None:
+    conn = db_connect()
+    try:
+        total_users = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+        total_collection_gifts = conn.execute("SELECT COUNT(*) as cnt FROM collection").fetchone()["cnt"]
+        total_sold = conn.execute("SELECT SUM(total_sold) as s FROM users").fetchone()["s"] or 0
+        total_drops = conn.execute("SELECT SUM(total_drops) as s FROM users").fetchone()["s"] or 0
+        total_stars_capital = conn.execute("SELECT SUM(balance_stars) as s FROM users").fetchone()["s"] or 0
+        total_clans = conn.execute("SELECT COUNT(*) as cnt FROM clans").fetchone()["cnt"]
+    finally:
+        conn.close()
 
-    if clan:
-        cnt = get_clan_members_count(clan["id"])
-        ctype_str = "Открытый" if clan["type"] == "public" else ("Вход за ⭐" if clan["type"] == "stars" else "Закрытый")
-        fee_str = f" ({clan['entry_fee']}⭐)" if clan["type"] == "stars" else ""
+    text = (
+        "👑 <b>Админ-панель бота</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Всего пользователей: <b>{total_users:,}</b>\n"
+        f"🛡 Всего кланов: <b>{total_clans:,}</b>\n"
+        f"💰 Общий капитал звезд: <b>{total_stars_capital:,} ⭐</b>\n"
+        f"🎁 Всего подарков в коллекциях: <b>{total_collection_gifts:,}</b>\n"
+        f"🎰 Всего прокручено/выбито дропов: <b>{total_drops:,}</b>\n"
+        f"🛍 Всего продано предметов: <b>{total_sold:,}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Выберите действие для управления:"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ Выдать Звёзды игроку", callback_data="admin_give_stars_start")],
+        [InlineKeyboardButton("🎁 Выдать NFT-подарок", callback_data="admin_give_nft_start")],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="nav_main")],
+    ])
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def admin_give_stars_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    await query.edit_message_text("⭐ Введите ID или @username пользователя для выдачи Stars:")
+    return WAIT_ADMIN_GIVE_STARS_USER
+
+async def admin_give_stars_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_str = update.message.text.strip()
+    target = get_user_by_target(target_str)
+    if not target:
+        await update.message.reply_text("❌ Пользователь не найден. Попробуйте еще раз:")
+        return WAIT_ADMIN_GIVE_STARS_USER
+    context.user_data["admin_target_user_id"] = target["user_id"]
+    await update.message.reply_text(f"✅ Пользователь найден (ID: {target['user_id']}). Введите количество ⭐ для выдачи:")
+    return WAIT_ADMIN_GIVE_STARS_AMOUNT
+
+async def admin_give_stars_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    amt_str = update.message.text.strip()
+    if not amt_str.isdigit() or int(amt_str) <= 0:
+        await update.message.reply_text("❌ Введите корректное число звезд:")
+        return WAIT_ADMIN_GIVE_STARS_AMOUNT
+
+    amount = int(amt_str)
+    target_id = context.user_data.get("admin_target_user_id")
+    add_user_stars(target_id, amount)
+    await update.message.reply_text(f"✅ Успешно выдано <b>{amount:,} ⭐</b> пользователю!", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+async def admin_give_nft_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    await query.edit_message_text("🎁 Введите ID или @username пользователя для выдачи NFT:")
+    return WAIT_ADMIN_GIVE_NFT_USER
+
+async def admin_give_nft_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_str = update.message.text.strip()
+    target = get_user_by_target(target_str)
+    if not target:
+        await update.message.reply_text("❌ Пользователь не найден. Попробуйте снова:")
+        return WAIT_ADMIN_GIVE_NFT_USER
+    context.user_data["admin_target_user_id"] = target["user_id"]
+    
+    keys_sample = ", ".join(list(GIFTS_BY_KEY.keys())[:15])
+    await update.message.reply_text(f"✅ Пользователь найден. Введите ключ подарка (например, <code>pepe_heart</code>, <code>hero_figure</code>):\n\nДоступные ключи: {keys_sample}", parse_mode=ParseMode.HTML)
+    return WAIT_ADMIN_GIVE_NFT_KEY
+
+async def admin_give_nft_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    gkey = update.message.text.strip()
+    if gkey not in GIFTS_BY_KEY:
+        await update.message.reply_text("❌ Неверный ключ подарка! Проверьте список и введите заново:")
+        return WAIT_ADMIN_GIVE_NFT_KEY
+
+    target_id = context.user_data.get("admin_target_user_id")
+    add_to_collection(target_id, gkey)
+    gift = GIFTS_BY_KEY[gkey]
+    await update.message.reply_text(f"✅ Успешно выдан предмет <b>{gift.name}</b> пользователю!", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+# ---------------------------------------------------------------------------
+# КЛАНЫ - ИНТЕРФЕЙС И УПРАВЛЕНИЕ
+# ---------------------------------------------------------------------------
+
+CLAN_CREATE_LEVEL_REQ = 10
+CLAN_CREATE_COST = 100_000
+
+async def show_clans_hub(query_or_update, user_id: int) -> None:
+    user_clan = get_user_clan(user_id)
+    db_user = get_or_create_user(user_id, "", "")
+    lvl, _, _, _ = calculate_xp_level_info(db_user["xp"])
+
+    if user_clan:
+        cnt = get_clan_members_count(user_clan["id"])
+        is_owner = (user_clan["owner_id"] == user_id)
+        upgrade_cost = get_clan_upgrade_cost(user_clan["max_members"])
 
         text = (
-            f"🛡 <b>Твой Клан: [{clan['tag']}] {clan['name']}</b>\n"
+            f"🛡 <b>Ваш клан: [{user_clan['tag']}] {user_clan['name']}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📝 Описание: {clan['description'] or 'Отсутствует'}\n"
-            f"👥 Участники: <b>{cnt}/{clan['max_members']}</b>\n"
-            f"🔒 Тип: <b>{ctype_str}{fee_str}</b>\n\n"
-            "Выбери действие ниже:"
+            f"📝 Описание: {user_clan['description'] or 'Нет'}\n"
+            f"👥 Участники: <b>{cnt}/{user_clan['max_members']}</b>\n"
+            f"👑 Владелец ID: <code>{user_clan['owner_id']}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━"
         )
-
         buttons = [
-            [InlineKeyboardButton("👥 Участники клана", callback_data=f"clan_members:{clan['id']}")],
-            [InlineKeyboardButton("🔍 Просмотреть все кланы", callback_data="clan_list:1")],
+            [InlineKeyboardButton("👥 Список участников", callback_data=f"clan_members:{user_clan['id']}")],
         ]
-
-        if clan["owner_id"] == user_id:
-            buttons.append([InlineKeyboardButton("➕ Расширить слоты (+15)", callback_data=f"clan_upgrade:{clan['id']}")])
-            if clan["type"] == "private":
-                reqs = get_clan_requests(clan["id"])
-                buttons.append([InlineKeyboardButton(f"📩 Заявки ({len(reqs)})", callback_data=f"clan_requests:{clan['id']}")])
-            buttons.append([InlineKeyboardButton("❌ Удалить клан", callback_data=f"clan_delete_confirm:{clan['id']}")])
+        if is_owner:
+            buttons.append([InlineKeyboardButton(f"⬆️ Улучшить места (+15 за {upgrade_cost:,}⭐)", callback_data=f"clan_upgrade:{user_clan['id']}")])
+            buttons.append([InlineKeyboardButton("📩 Заявки в клан", callback_data=f"clan_requests:{user_clan['id']}")])
+            buttons.append([InlineKeyboardButton("🔥 Расформировать клан", callback_data=f"clan_delete_confirm:{user_clan['id']}")])
         else:
-            buttons.append([InlineKeyboardButton("🚪 Покинуть клан", callback_data=f"clan_leave:{clan['id']}")])
+            buttons.append([InlineKeyboardButton("🚪 Покинуть клан", callback_data="clan_leave:1")])
 
         buttons.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="nav_main")])
         kb = InlineKeyboardMarkup(buttons)
     else:
         text = (
             "🛡 <b>Система Кланов</b>\n\n"
-            "Вы пока не состоите ни в одном клане.\n"
-            "Вы можете создать свой собственный клан или вступить в существующий!\n\n"
-            "📌 <b>Условия создания клана:</b>\n"
-            "• Уровень: <b>10+</b>\n"
-            "• Стоимость: <b>100,000 ⭐</b>"
+            f"• Ваш уровень: <b>{lvl}</b> (нужен 10+)\n"
+            f"• Стоимость создания: <b>100,000 ⭐</b>\n\n"
+            "Вы можете создать собственный клан или просмотреть существующие:"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Создать клан", callback_data="clan_create_start")],
-            [InlineKeyboardButton("🔍 Просмотреть кланы", callback_data="clan_list:1")],
+            [InlineKeyboardButton("🏷 Создать клан", callback_data="clan_create_start")],
+            [InlineKeyboardButton("📋 Просмотреть кланы", callback_data="clan_list:1")],
             [InlineKeyboardButton("⬅️ Главное меню", callback_data="nav_main")],
         ])
 
-    if query.message.photo:
-        await query.message.delete()
-        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    if hasattr(query_or_update, "message") and query_or_update.message:
+        if query_or_update.message.photo:
+            await query_or_update.message.delete()
+            await query_or_update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query_or_update.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await query_or_update.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def show_clans_list(query, page: int = 1) -> None:
     clans, total_pages = get_all_clans(page, page_size=5)
-
-    text = f"📋 <b>Список Кланов (Стр. {page}/{total_pages})</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+    text = f"📋 <b>Список кланов (Стр. {page}/{total_pages}):</b>\n\n"
     buttons = []
 
-    if not clans:
-        text += "Пока не создано ни одного клана."
-    else:
-        for c in clans:
-            cnt = get_clan_members_count(c["id"])
-            ctype = "Открытый" if c["type"] == "public" else ("Вход за ⭐" if c["type"] == "stars" else "Закрытый")
-            text += f"🛡 <b>[{c['tag']}] {c['name']}</b>\n"
-            text += f"• Участники: <b>{cnt}/{c['max_members']}</b> | Тип: <b>{ctype}</b>\n\n"
+    for c in clans:
+        cnt = get_clan_members_count(c["id"])
+        ctype = "Публичный" if c["type"] == "public" else ("За звёзды" if c["type"] == "stars" else "Закрытый")
+        text += f"🛡 <b>[{c['tag']}] {c['name']}</b> — {cnt}/{c['max_members']} чел. ({ctype})\n"
+        buttons.append([InlineKeyboardButton(f"[{c['tag']}] {c['name']} ({cnt}/{c['max_members']})", callback_data=f"clan_info:{c['id']}")])
 
-            buttons.append([InlineKeyboardButton(f"ℹ️ [{c['tag']}] {c['name']}", callback_data=f"clan_info:{c['id']}")])
-
-    nav = []
+    nav_row = []
     if page > 1:
-        nav.append(InlineKeyboardButton("◀️ Назад", callback_data=f"clan_list:{page-1}"))
-    nav.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"clan_list:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
     if page < total_pages:
-        nav.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"clan_list:{page+1}"))
-    
-    if nav:
-        buttons.append(nav)
+        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"clan_list:{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton("➕ Создать клан", callback_data="clan_create_start")])
     buttons.append([InlineKeyboardButton("⬅️ Назад в кланы", callback_data="nav_clans_hub")])
-
     kb = InlineKeyboardMarkup(buttons)
+
     if query.message.photo:
         await query.message.delete()
         await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-
-# --- Conversation Handler для создания клана ---
 
 async def start_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-
-    db_user = get_or_create_user(user_id, "", "")
+    user = query.from_user
+    db_user = get_or_create_user(user.id, user.username, user.first_name)
     lvl, _, _, _ = calculate_xp_level_info(db_user["xp"])
-
-    if get_user_clan(user_id):
-        await query.answer("❌ Вы уже состоите в клане!", show_alert=True)
-        return ConversationHandler.END
 
     if lvl < CLAN_CREATE_LEVEL_REQ:
         await query.answer(f"❌ Для создания клана нужен {CLAN_CREATE_LEVEL_REQ} уровень!", show_alert=True)
@@ -1221,21 +1311,16 @@ async def start_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(f"❌ Создание клана стоит {CLAN_CREATE_COST:,} ⭐!", show_alert=True)
         return ConversationHandler.END
 
+    msg_text = (
+        "🏷 <b>Шаг 1 из 4: Клантег</b>\n\n"
+        "Введите заглавный англ. клантег (от 3 до 6 символов, только A-Z и 0-9).\n"
+        "<i>Пример: TOP1, GODS, ALPHA</i>"
+    )
     if query.message.photo:
         await query.message.delete()
-        await query.message.reply_text(
-            "🏷 <b>Шаг 1 из 4: Клантег</b>\n\n"
-            "Введите заглавный англ. клантег (от 3 до 6 символов, только A-Z и 0-9).\n"
-            "<i>Пример: TOP1, GODS, ALPHA</i>",
-            parse_mode=ParseMode.HTML
-        )
+        await query.message.reply_text(msg_text, parse_mode=ParseMode.HTML)
     else:
-        await query.edit_message_text(
-            "🏷 <b>Шаг 1 из 4: Клантег</b>\n\n"
-            "Введите заглавный англ. клантег (от 3 до 6 символов, только A-Z и 0-9).\n"
-            "<i>Пример: TOP1, GODS, ALPHA</i>",
-            parse_mode=ParseMode.HTML
-        )
+        await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML)
     return WAIT_CLAN_TAG
 
 async def clan_tag_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1335,6 +1420,16 @@ async def finalize_clan_creation(user_id: int, context: ContextTypes.DEFAULT_TYP
 async def cancel_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено.")
     return ConversationHandler.END
+
+# ---------------------------------------------------------------------------
+# ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ (/clans, /market)
+# ---------------------------------------------------------------------------
+
+async def cmd_clans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await show_clans_hub(update.message, update.effective_user.id)
+
+async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await show_shop_page(update.message, update.effective_user.id)
 
 # ---------------------------------------------------------------------------
 # ПРОЧИЕ СТРАНИЦЫ
@@ -1585,8 +1680,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "noop":
         return
 
-    if query.message.chat.type != "private" and data in ("nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "nav_clans_hub"):
+    if query.message.chat.type != "private" and data in ("nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "nav_clans_hub", "admin_panel"):
         await query.answer("⚠️ Откройте личные сообщения с ботом!", show_alert=True)
+        return
+
+    if data == "admin_panel":
+        if user.id not in ADMIN_IDS:
+            await query.answer("❌ Доступ запрещен!", show_alert=True)
+            return
+        await show_admin_panel(query)
         return
 
     if data == "nav_main":
@@ -2146,7 +2248,14 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     db_init()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+    )
+
+    app = Application.builder().token(BOT_TOKEN).request(request).build()
 
     clan_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_clan_creation, pattern="^clan_create_start$")],
@@ -2160,20 +2269,43 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
     )
 
+    admin_give_stars_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_give_stars_start, pattern="^admin_give_stars_start$")],
+        states={
+            WAIT_ADMIN_GIVE_STARS_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_stars_user)],
+            WAIT_ADMIN_GIVE_STARS_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_stars_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
+    )
+
+    admin_give_nft_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_give_nft_start, pattern="^admin_give_nft_start$")],
+        states={
+            WAIT_ADMIN_GIVE_NFT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_nft_user)],
+            WAIT_ADMIN_GIVE_NFT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_nft_key)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
+    )
+
     app.add_handler(clan_conv)
+    app.add_handler(admin_give_stars_conv)
+    app.add_handler(admin_give_nft_conv)
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("profile", cmd_profile_alias))
     app.add_handler(CommandHandler("pay", cmd_pay))
     app.add_handler(CommandHandler("send_gift", cmd_send_gift))
+    app.add_handler(CommandHandler("clans", cmd_clans))
+    app.add_handler(CommandHandler("market", cmd_market))
 
     app.add_handler(MessageHandler(filters.Regex(re.compile(r"^(кто я|я)$", re.IGNORECASE)), cmd_profile_alias))
 
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_group_message))
 
-    log.info("NFT-Gift Bot v9.0 с системой кланов запущен!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    log.info("NFT-Gift Bot v9.3 запущен!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
