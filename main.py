@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NFT-Gift Bot v9.0 — Clans Update.
+NFT-Gift Bot v9.5 — Fixed Clans & Market Integration.
 - Система Кланов:
   * Создание с 10 ур. за 100,000 ⭐.
   * Валидация тега (3-6 символов, A-Z, 0-9). Название до 15 символов.
   * Типы: Публичный, Закрытый (по заявкам), Вход за звёзды.
-  * Просмотр списка кланов и инфо. Управление (кик, заявки).
-  * Расширение слотов (базово 15).
-  * Отображение клантега [TAG] жёлтым цветом (без эмодзи при отрисовке на Pillow).
+  * Исправлена пошаговая FSM-цепочка создания клана.
+  * Команды /clans и /market работают правильно и без сбоев.
 """
 
 import asyncio
@@ -65,9 +64,9 @@ COOLDOWN_ENABLED = True
 CHAT_DROP_CHANCE = 0.90                 # 90%
 STAR_RUB_RATE = 1.5                     # 1 Star = 1.5 RUB
 TON_RUB_RATE = 100.0                    # 1 TON = 100 RUB
-ADMIN_IDS = {684535319, 7459502130}  # Укажите Telegram ID администраторов
+ADMIN_IDS = {684535319, 7459502130}     # Telegram ID администраторов
 
-# FSM Состояния создания и настройки клана
+# FSM Состояния
 (
     WAIT_CLAN_TAG,
     WAIT_CLAN_NAME,
@@ -117,7 +116,7 @@ def ensure_fonts_exist():
 ensure_fonts_exist()
 
 # ---------------------------------------------------------------------------
-# Нормализатор имен (без Эмодзи для Pillow)
+# Нормализатор имен
 # ---------------------------------------------------------------------------
 
 def normalize_telegram_name(name: str) -> str:
@@ -136,7 +135,7 @@ def normalize_telegram_name(name: str) -> str:
     return final_str if final_str else "Player"
 
 # ---------------------------------------------------------------------------
-# NFT Каталог & Цены (шансы редких предметов в кейсе 10000⭐ снижены в 10 раз)
+# NFT Каталог & Цены
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -157,7 +156,7 @@ class GiftDef:
 
 
 GIFTS: list[GiftDef] = [
-    # Легендарные и ультра-дорогие (шансы уменьшены в 10 раз)
+    # Легендарные и ультра-дорогие
     GiftDef("pepe_heart", "Plush Pepe (Пепе с сердцем)", 350_000, 0.0005, 100_000),
     GiftDef("hero_figure", "Durov Figure (Фигурка Дурова)", 30_000, 0.003, 25_000),
     GiftDef("cap_tg", "Durov's Cap (Кепка Дурова)", 28_000, 0.004, 20_000),
@@ -639,7 +638,7 @@ def resolve_pending_drop(drop_id: int) -> None:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# КЛАНЫ - ХЕЛПЕРЫ ДЛЯ БАЗЫ ДАННЫХ
+# КЛАНЫ — БАЗА ДАННЫХ
 # ---------------------------------------------------------------------------
 
 def get_user_clan(user_id: int) -> Optional[sqlite3.Row]:
@@ -787,7 +786,7 @@ def remove_clan_request(clan_id: int, user_id: int) -> None:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# РЕНДЕР КАРТОЧЕК (Без Использования Эмодзи)
+# РЕНДЕР КАРТОЧЕК
 # ---------------------------------------------------------------------------
 
 def draw_rounded_rect(draw, coords, radius, fill=None, outline=None, width=1):
@@ -956,6 +955,9 @@ async def generate_profile_card_image(
     return bio
 
 # ---------------------------------------------------------------------------
+# КЛАВИАТУРЫ
+# ---------------------------------------------------------------------------
+
 def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
     buttons = [
         [
@@ -1037,7 +1039,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, context)
 
 async def show_profile_handler(update_or_query, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") else update_or_query.from_user
+    user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") and update_or_query.effective_user else update_or_query.from_user
     db_user = get_or_create_user(user_id, user.username, user.first_name)
     cleaned_name = normalize_telegram_name(user.first_name or "User")
 
@@ -1308,7 +1310,7 @@ async def start_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = update.effective_user
         msg_obj = update.message
 
-    db_user = get_or_create_user(user.id, user.username, user.first_name)
+    db_user = get_or_create_user(user.id, user.username or "", user.first_name or "")
     lvl, _, _, _ = calculate_xp_level_info(db_user["xp"])
 
     if lvl < CLAN_CREATE_LEVEL_REQ:
@@ -1436,30 +1438,14 @@ async def cancel_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # ---------------------------------------------------------------------------
-# ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ (/clans, /market)
+# ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ И МЕНЮ
 # ---------------------------------------------------------------------------
 
 async def cmd_clans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await show_clans_hub(update, update.effective_user.id)
 
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    db_user = get_or_create_user(update.effective_user.id, "", "")
-    text = (
-        "🛍 <b>Магазин улучшений</b>\n\n"
-        f"Текущие слоты инвентаря: <b>{db_user['max_inventory']}</b>\n"
-        f"Твой баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
-        "Доступные улучшения:\n"
-        "• <b>+10 Слотов коллекции</b> — <b>300 ⭐</b>\n"
-        "• <b>+25 Слотов коллекции</b> — <b>650 ⭐</b>\n"
-        "• <b>+50 Слотов коллекции</b> — <b>1,200 ⭐</b>"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 +10 Слотов (300⭐)", callback_data="buy_slots:10:300")],
-        [InlineKeyboardButton("📦 +25 Слотов (650⭐)", callback_data="buy_slots:25:650")],
-        [InlineKeyboardButton("📦 +50 Слотов (1200⭐)", callback_data="buy_slots:50:1200")],
-        [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
-    ])
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await show_shop_page(update.message if update.message else update.callback_query, update.effective_user.id)
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in ADMIN_IDS:
@@ -1497,10 +1483,6 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-
-async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await show_shop_page(update.message, update.effective_user.id)
-
 # ---------------------------------------------------------------------------
 # ПРОЧИЕ СТРАНИЦЫ
 # ---------------------------------------------------------------------------
@@ -1512,7 +1494,7 @@ async def show_info_page(update_or_query) -> None:
         "🎮 <b>Как играть в группах?</b>\n"
         "1. Добавьте бота в ваш групповой чат.\n"
         "2. Напишите ровно слово <code>NFT</code> в чат (1 раз в час).\n"
-        "3. Выбивайте гифты, корите Stars, вступайте в кланы!"
+        "3. Выбивайте гифты, копите Stars, вступайте в кланы!"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить бота в группу", url=f"https://t.me/{ContextTypes.DEFAULT_TYPE.__name__}?startgroup=true")],
@@ -1552,7 +1534,7 @@ async def show_settings_page(query, user_id: int) -> None:
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-async def show_shop_page(query, user_id: int) -> None:
+async def show_shop_page(query_or_msg, user_id: int) -> None:
     db_user = get_or_create_user(user_id, "", "")
     text = (
         "🛍 <b>Магазин улучшений</b>\n\n"
@@ -1571,11 +1553,14 @@ async def show_shop_page(query, user_id: int) -> None:
         [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
     ])
 
-    if query.message.photo:
-        await query.message.delete()
-        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    if hasattr(query_or_msg, "message") and query_or_msg.message:
+        if query_or_msg.message.photo:
+            await query_or_msg.message.delete()
+            await query_or_msg.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query_or_msg.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await query_or_msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def show_collection_page(query, user_id: int, page: int = 1) -> None:
     items = get_user_collection(user_id)
@@ -1691,7 +1676,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     user = update.effective_user
-    row = get_or_create_user(user.id, user.username, user.first_name)
+    row = get_or_create_user(user.id, user.username or "", user.first_name or "")
 
     now = int(time.time())
     if COOLDOWN_ENABLED:
@@ -1769,7 +1754,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             photo=InputFile(banner_img, filename="menu.png"),
             caption="🏠 <b>Главное меню New NFT Bot:</b>",
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard()
+            reply_markup=main_menu_keyboard(user.id)
         )
         return
 
@@ -2253,7 +2238,7 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     target_str, amount_str = args[0], args[1]
     if not amount_str.isdigit() or int(amount_str) <= 0:
-        await update.message.reply_text("❌ Введите число.")
+        await update.message.reply_text("❌ Введите корректное число.")
         return
 
     amount = int(amount_str)
@@ -2340,7 +2325,8 @@ def main() -> None:
             WAIT_CLAN_FEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, clan_fee_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
-        per_message=False
+        per_message=False,
+        allow_reentry=True
     )
 
     admin_give_stars_conv = ConversationHandler(
@@ -2350,7 +2336,8 @@ def main() -> None:
             WAIT_ADMIN_GIVE_STARS_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_stars_amount)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
-        per_message=False
+        per_message=False,
+        allow_reentry=True
     )
 
     admin_give_nft_conv = ConversationHandler(
@@ -2360,7 +2347,8 @@ def main() -> None:
             WAIT_ADMIN_GIVE_NFT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_nft_key)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
-        per_message=False
+        per_message=False,
+        allow_reentry=True
     )
 
     app.add_handler(clan_conv)
@@ -2381,7 +2369,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_group_message))
 
-    log.info("NFT-Gift Bot v9.3 запущен!")
+    log.info("NFT-Gift Bot v9.5 запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
