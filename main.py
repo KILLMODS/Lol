@@ -1298,17 +1298,27 @@ async def show_clans_list(query, page: int = 1) -> None:
 
 async def start_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    user = query.from_user
+    if query:
+        await query.answer()
+        user = query.from_user
+        msg_obj = query.message
+    else:
+        user = update.effective_user
+        msg_obj = update.message
+
     db_user = get_or_create_user(user.id, user.username, user.first_name)
     lvl, _, _, _ = calculate_xp_level_info(db_user["xp"])
 
     if lvl < CLAN_CREATE_LEVEL_REQ:
-        await query.answer(f"❌ Для создания клана нужен {CLAN_CREATE_LEVEL_REQ} уровень!", show_alert=True)
+        text = f"❌ Для создания клана нужен {CLAN_CREATE_LEVEL_REQ} уровень!"
+        if query: await query.answer(text, show_alert=True)
+        else: await msg_obj.reply_text(text)
         return ConversationHandler.END
 
     if db_user["balance_stars"] < CLAN_CREATE_COST:
-        await query.answer(f"❌ Создание клана стоит {CLAN_CREATE_COST:,} ⭐!", show_alert=True)
+        text = f"❌ Создание клана стоит {CLAN_CREATE_COST:,} ⭐!"
+        if query: await query.answer(text, show_alert=True)
+        else: await msg_obj.reply_text(text)
         return ConversationHandler.END
 
     msg_text = (
@@ -1316,11 +1326,13 @@ async def start_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Введите заглавный англ. клантег (от 3 до 6 символов, только A-Z и 0-9).\n"
         "<i>Пример: TOP1, GODS, ALPHA</i>"
     )
-    if query.message.photo:
+    if query and query.message.photo:
         await query.message.delete()
         await query.message.reply_text(msg_text, parse_mode=ParseMode.HTML)
-    else:
+    elif query:
         await query.edit_message_text(msg_text, parse_mode=ParseMode.HTML)
+    else:
+        await msg_obj.reply_text(msg_text, parse_mode=ParseMode.HTML)
     return WAIT_CLAN_TAG
 
 async def clan_tag_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1426,7 +1438,63 @@ async def cancel_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------------------------------------------------------------------
 
 async def cmd_clans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await show_clans_hub(update.message, update.effective_user.id)
+    await show_clans_hub(update, update.effective_user.id)
+
+async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db_user = get_or_create_user(update.effective_user.id, "", "")
+    text = (
+        "🛍 <b>Магазин улучшений</b>\n\n"
+        f"Текущие слоты инвентаря: <b>{db_user['max_inventory']}</b>\n"
+        f"Твой баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
+        "Доступные улучшения:\n"
+        "• <b>+10 Слотов коллекции</b> — <b>300 ⭐</b>\n"
+        "• <b>+25 Слотов коллекции</b> — <b>650 ⭐</b>\n"
+        "• <b>+50 Слотов коллекции</b> — <b>1,200 ⭐</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 +10 Слотов (300⭐)", callback_data="buy_slots:10:300")],
+        [InlineKeyboardButton("📦 +25 Слотов (650⭐)", callback_data="buy_slots:25:650")],
+        [InlineKeyboardButton("📦 +50 Слотов (1200⭐)", callback_data="buy_slots:50:1200")],
+        [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    conn = db_connect()
+    try:
+        total_users = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+        total_collection_gifts = conn.execute("SELECT COUNT(*) as cnt FROM collection").fetchone()["cnt"]
+        total_sold = conn.execute("SELECT SUM(total_sold) as s FROM users").fetchone()["s"] or 0
+        total_drops = conn.execute("SELECT SUM(total_drops) as s FROM users").fetchone()["s"] or 0
+        total_stars_capital = conn.execute("SELECT SUM(balance_stars) as s FROM users").fetchone()["s"] or 0
+        total_clans = conn.execute("SELECT COUNT(*) as cnt FROM clans").fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    text = (
+        "👑 <b>Админ-панель бота</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Всего пользователей: <b>{total_users:,}</b>\n"
+        f"🛡 Всего кланов: <b>{total_clans:,}</b>\n"
+        f"💰 Общий капитал звезд: <b>{total_stars_capital:,} ⭐</b>\n"
+        f"🎁 Всего подарков в коллекциях: <b>{total_collection_gifts:,}</b>\n"
+        f"🎰 Всего прокручено/выбито дропов: <b>{total_drops:,}</b>\n"
+        f"🛍 Всего продано предметов: <b>{total_sold:,}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Выберите действие для управления:"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ Выдать Звёзды игроку", callback_data="admin_give_stars_start")],
+        [InlineKeyboardButton("🎁 Выдать NFT-подарок", callback_data="admin_give_nft_start")],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="nav_main")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
 
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await show_shop_page(update.message, update.effective_user.id)
@@ -2258,7 +2326,10 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).request(request).build()
 
     clan_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_clan_creation, pattern="^clan_create_start$")],
+        entry_points=[
+            CallbackQueryHandler(start_clan_creation, pattern="^clan_create_start$"),
+            CommandHandler("create_clan", start_clan_creation),
+        ],
         states={
             WAIT_CLAN_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, clan_tag_received)],
             WAIT_CLAN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, clan_name_received)],
@@ -2267,6 +2338,7 @@ def main() -> None:
             WAIT_CLAN_FEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, clan_fee_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
+        per_message=False
     )
 
     admin_give_stars_conv = ConversationHandler(
@@ -2276,6 +2348,7 @@ def main() -> None:
             WAIT_ADMIN_GIVE_STARS_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_stars_amount)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
+        per_message=False
     )
 
     admin_give_nft_conv = ConversationHandler(
@@ -2285,6 +2358,7 @@ def main() -> None:
             WAIT_ADMIN_GIVE_NFT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_give_nft_key)],
         },
         fallbacks=[CommandHandler("cancel", cancel_clan_creation)],
+        per_message=False
     )
 
     app.add_handler(clan_conv)
@@ -2298,6 +2372,7 @@ def main() -> None:
     app.add_handler(CommandHandler("send_gift", cmd_send_gift))
     app.add_handler(CommandHandler("clans", cmd_clans))
     app.add_handler(CommandHandler("market", cmd_market))
+    app.add_handler(CommandHandler("admin", cmd_admin))
 
     app.add_handler(MessageHandler(filters.Regex(re.compile(r"^(кто я|я)$", re.IGNORECASE)), cmd_profile_alias))
 
