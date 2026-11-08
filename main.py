@@ -64,9 +64,26 @@ CHAT_DROP_CHANCE = 0.85                 # Шанс выпадения подар
 STAR_RUB_RATE = 1.5                     # 1 Star = 1.5 RUB
 TON_RUB_RATE = 100.0                    # 1 TON = 100 RUB
 
-# Состояния для диалогов админ-панели
+# Состояния для диалогов
 WAITING_ADMIN_GIVE_STARS = 1
 WAITING_ADMIN_GIVE_GIFT_USER = 2
+
+# Состояния для создания клана
+WAITING_CLAN_TAG = 10
+WAITING_CLAN_NAME = 11
+WAITING_CLAN_DESC = 12
+WAITING_CLAN_TYPE = 13
+WAITING_CLAN_PRICE = 14
+
+CLAN_CREATE_LEVEL_REQ = 10
+CLAN_CREATE_COST = 150_000
+
+# Цены расширения мест в клане: (target_slots, cost)
+CLAN_SLOT_UPGRADES = [
+    (30, 100_000),
+    (45, 500_000),
+    (60, 2_000_000),
+]
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -128,7 +145,7 @@ class GiftDef:
 
 GIFTS: list[GiftDef] = [
     # Ультра-легендарные (NFT)
-    GiftDef("pepe_heart", "Plush Pepe", 455_600, 0.005, 100_000, is_nft=True),
+    GiftDef("pepe_heart", "Plush Pepe", 455_600, 0.0005, 100_000, is_nft=True),
     GiftDef("trophy_cup", "Algorithm Cup", 81_733, 0.015, 35_000, is_nft=True),
     GiftDef("intelligence_cup", "Intelligence Cup", 83_750, 0.015, 35_000, is_nft=True),
     GiftDef("heart_lock_key", "Heart Locket", 87_100, 0.02, 25_000, is_nft=True),
@@ -152,17 +169,17 @@ GIFTS: list[GiftDef] = [
     GiftDef("khabibs_papakha", "Khabib's Papakha", 1_875, 0.55, 1_800, is_nft=True),
 
     # Обычные и классические подарки
-    GiftDef("crystal_ball", "Crystal Ball", 920, 1.50, 750, is_nft=False),
-    GiftDef("jester_hat", "Jester Hat", 900, 1.40, 700, is_nft=False),
-    GiftDef("sandcastle", "Sandcastle", 900, 1.40, 700, is_nft=False),
-    GiftDef("witch_hat", "Witch Hat", 900, 1.40, 700, is_nft=False),
-    GiftDef("sakura_flower", "Sakura Flower", 850, 1.70, 650, is_nft=False),
-    GiftDef("teddy_pumpkin", "Mad Pumpkin", 830, 2.00, 600, is_nft=False),
-    GiftDef("hex_pot", "Hex Pot", 800, 1.80, 580, is_nft=False),
-    GiftDef("lush_bouquet", "Lush Bouquet", 800, 1.80, 580, is_nft=False),
-    GiftDef("coffin", "Gravestone", 660, 2.50, 450, is_nft=False),
-    GiftDef("spring_basket", "Spring Basket", 650, 2.60, 440, is_nft=False),
-    GiftDef("roses", "Roses", 600, 2.80, 400, is_nft=False),
+    GiftDef("crystal_ball", "Crystal Ball", 920, 1.50, 750, is_nft=True),
+    GiftDef("jester_hat", "Jester Hat", 900, 1.40, 700, is_nft=True),
+    GiftDef("sandcastle", "Sandcastle", 900, 1.40, 700, is_nft=True),
+    GiftDef("witch_hat", "Witch Hat", 900, 1.40, 700, is_nft=True),
+    GiftDef("sakura_flower", "Sakura Flower", 850, 1.70, 650, is_nft=True),
+    GiftDef("teddy_pumpkin", "Mad Pumpkin", 830, 2.00, 600, is_nft=True),
+    GiftDef("hex_pot", "Hex Pot", 800, 1.80, 580, is_nft=True),
+    GiftDef("lush_bouquet", "Lush Bouquet", 800, 1.80, 580, is_nft=True),
+    GiftDef("coffin", "Gravestone", 660, 2.50, 450, is_nft=True),
+    GiftDef("spring_basket", "Spring Basket", 650, 2.60, 440, is_nft=True),
+    GiftDef("roses", "Roses", 600, 2.80, 400, is_nft=True),
 
     # Базовые мишки
     GiftDef("teddy_patrick", "Irish Bear", 50, 10.00, 50, is_nft=False),
@@ -249,6 +266,71 @@ def roll_gift_from_pool(pool: List[GiftDef]) -> GiftDef:
     weights = [1.0 / (g.chance + 0.0001) for g in pool]
     return random.choices(pool, weights=weights, k=1)[0]
 
+def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_path = FONT_BOLD_PATH if bold else FONT_REGULAR_PATH
+    if font_path.exists():
+        try:
+            return ImageFont.truetype(str(font_path), size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+def draw_rounded_rect(draw: ImageDraw.ImageDraw, xy: list, radius: int, fill: tuple):
+    draw.rounded_rectangle(xy, radius=radius, fill=fill)
+
+def make_default_avatar(size: int, text: str) -> Image.Image:
+    img = Image.new("RGBA", (size, size), (45, 55, 72, 255))
+    draw = ImageDraw.Draw(img)
+    f = load_font(int(size * 0.4), bold=True)
+    draw.text((size // 2, size // 2), text[:2].upper(), font=f, fill=(255, 255, 255), anchor="mm")
+    return img
+
+async def generate_main_menu_banner() -> io.BytesIO:
+    WIDTH, HEIGHT = 1000, 320
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (20, 26, 38, 255))
+    
+    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse([200, -80, 800, 380], fill=(40, 70, 130, 150))
+    glow = glow.filter(ImageFilter.GaussianBlur(40))
+    img = Image.alpha_composite(img, glow)
+    
+    draw = ImageDraw.Draw(img)
+    f_title = load_font(52, bold=True)
+    f_sub = load_font(24, bold=False)
+
+    draw.text((WIDTH // 2, 110), "NEW NFT MARKET & BOT", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 180), "Collect Gifts, Earn Stars and Build Your Empire", font=f_sub, fill=(234, 179, 8), anchor="mm")
+
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    bio.name = "menu.png"
+    bio.seek(0)
+    return bio
+
+async def generate_market_banner() -> io.BytesIO:
+    WIDTH, HEIGHT = 1000, 320
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (20, 30, 45, 255))
+    
+    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse([250, -50, 750, 350], fill=(50, 80, 140, 160))
+    glow = glow.filter(ImageFilter.GaussianBlur(40))
+    img = Image.alpha_composite(img, glow)
+    
+    draw = ImageDraw.Draw(img)
+    f_title = load_font(52, bold=True)
+    f_sub = load_font(24, bold=False)
+
+    draw.text((WIDTH // 2, 110), "NFT & GIFT MARKET", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 180), "Trade and Collect Exclusive Items for Stars", font=f_sub, fill=(234, 179, 8), anchor="mm")
+
+    bio = io.BytesIO()
+    img.save(bio, "PNG")
+    bio.name = "market.png"
+    bio.seek(0)
+    return bio
+
 # ---------------------------------------------------------------------------
 # База данных SQLite (Фиксированное сохранение в data/base.db)
 # ---------------------------------------------------------------------------
@@ -298,6 +380,34 @@ def db_init() -> None:
                 gift_key TEXT NOT NULL,
                 created_ts INTEGER NOT NULL,
                 resolved INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS clans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER UNIQUE NOT NULL,
+                tag TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                clan_type TEXT NOT NULL DEFAULT 'public', -- 'public', 'private', 'paid'
+                join_price INTEGER NOT NULL DEFAULT 0,
+                max_members INTEGER NOT NULL DEFAULT 15,
+                created_ts INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS clan_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clan_id INTEGER NOT NULL,
+                user_id INTEGER UNIQUE NOT NULL,
+                joined_ts INTEGER NOT NULL,
+                FOREIGN KEY (clan_id) REFERENCES clans(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS clan_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clan_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_ts INTEGER NOT NULL,
+                UNIQUE(clan_id, user_id)
             );
             """
         )
@@ -644,73 +754,117 @@ def resolve_pending_drop(drop_id: int) -> None:
         conn.close()
 
 # ---------------------------------------------------------------------------
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ КЛАНОВ
+# ---------------------------------------------------------------------------
+
+def get_user_clan(user_id: int) -> Optional[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute(
+            """
+            SELECT c.*, cm.joined_ts 
+            FROM clan_members cm 
+            JOIN clans c ON cm.clan_id = c.id 
+            WHERE cm.user_id = ?
+            """,
+            (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+def get_clan_members_count(clan_id: int) -> int:
+    conn = db_connect()
+    try:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM clan_members WHERE clan_id=?", (clan_id,)).fetchone()
+        return row["cnt"] if row else 0
+    finally:
+        conn.close()
+
+def get_clan_by_id(clan_id: int) -> Optional[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute("SELECT * FROM clans WHERE id=?", (clan_id,)).fetchone()
+    finally:
+        conn.close()
+
+def get_all_clans(page: int = 1, page_size: int = 8) -> Tuple[List[sqlite3.Row], int]:
+    conn = db_connect()
+    try:
+        total = conn.execute("SELECT COUNT(*) as cnt FROM clans").fetchone()["cnt"]
+        total_pages = max(1, math.ceil(total / page_size))
+        page = min(page, total_pages)
+        offset = (page - 1) * page_size
+        rows = conn.execute("SELECT * FROM clans ORDER BY id DESC LIMIT ? OFFSET ?", (page_size, offset)).fetchall()
+        return rows, total_pages
+    finally:
+        conn.close()
+
+def create_clan_in_db(owner_id: int, tag: str, name: str, desc: str, clan_type: str, join_price: int) -> Optional[int]:
+    conn = db_connect()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO clans (owner_id, tag, name, description, clan_type, join_price, max_members, created_ts)
+            VALUES (?, ?, ?, ?, ?, ?, 15, ?)
+            """,
+            (owner_id, tag.upper(), name, desc, clan_type, join_price, int(time.time()))
+        )
+        clan_id = cur.lastrowid
+        conn.execute("INSERT INTO clan_members (clan_id, user_id, joined_ts) VALUES (?, ?, ?)", (clan_id, owner_id, int(time.time())))
+        conn.commit()
+        return clan_id
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+def join_clan_user(clan_id: int, user_id: int) -> bool:
+    conn = db_connect()
+    try:
+        clan = conn.execute("SELECT max_members FROM clans WHERE id=?", (clan_id,)).fetchone()
+        if not clan:
+            return False
+        cnt = conn.execute("SELECT COUNT(*) as cnt FROM clan_members WHERE clan_id=?", (clan_id,)).fetchone()["cnt"]
+        if cnt >= clan["max_members"]:
+            return False
+
+        conn.execute("INSERT INTO clan_members (clan_id, user_id, joined_ts) VALUES (?, ?, ?)", (clan_id, user_id, int(time.time())))
+        conn.execute("DELETE FROM clan_requests WHERE user_id=?", (user_id,))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def leave_clan_user(user_id: int) -> bool:
+    conn = db_connect()
+    try:
+        clan_member = conn.execute("SELECT clan_id FROM clan_members WHERE user_id=?", (user_id,)).fetchone()
+        if not clan_member:
+            return False
+        clan = conn.execute("SELECT owner_id FROM clans WHERE id=?", (clan_member["clan_id"],)).fetchone()
+        if clan and clan["owner_id"] == user_id:
+            # Если владелец выходит - клан удаляется
+            conn.execute("DELETE FROM clans WHERE id=?", (clan_member["clan_id"],))
+        else:
+            conn.execute("DELETE FROM clan_members WHERE user_id=?", (user_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+# ---------------------------------------------------------------------------
 # РЕНДЕР КАРТОЧЕК И БАННЕРОВ (Canvas Engine)
 # ---------------------------------------------------------------------------
 
-def draw_rounded_rect(draw, coords, radius, fill=None, outline=None, width=1):
-    draw.rounded_rectangle(coords, radius=radius, fill=fill, outline=outline, width=width)
-
-def make_default_avatar(size: int = 200, text: str = "Player") -> Image.Image:
-    img = Image.new("RGBA", (size, size), (43, 36, 74, 255))
-    draw = ImageDraw.Draw(img)
-
-    head_r = int(size * 0.22)
-    cx, cy = size // 2, int(size * 0.38)
-    draw.ellipse([cx - head_r, cy - head_r, cx + head_r, cy + head_r], fill=(225, 227, 238, 255))
-
-    body_r = int(size * 0.36)
-    bcy = int(size * 0.82)
-    draw.ellipse([cx - body_r, bcy - body_r, cx + body_r, bcy + body_r], fill=(225, 227, 238, 255))
-
-    font = None
-    if FONT_BOLD_PATH.exists():
-        try: font = ImageFont.truetype(str(FONT_BOLD_PATH), 22)
-        except: pass
-    if not font: font = ImageFont.load_default()
-
-    draw.text((size // 6, size - 36), text[:8], font=font, fill=(255, 255, 255, 230))
-    return img
-
-def load_font(size: int, bold: bool = False):
-    p = FONT_BOLD_PATH if bold else FONT_REGULAR_PATH
-    if p.exists():
-        try:
-            return ImageFont.truetype(str(p), size)
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-async def generate_main_menu_banner() -> io.BytesIO:
+async def generate_clans_banner() -> io.BytesIO:
     WIDTH, HEIGHT = 1000, 320
-    img = Image.new("RGBA", (WIDTH, HEIGHT), (27, 36, 48, 255))
-    draw = ImageDraw.Draw(img)
-
-    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow)
-    glow_draw.ellipse([300, -100, 700, 300], fill=(45, 55, 85, 180))
-    glow = glow.filter(ImageFilter.GaussianBlur(40))
-    img = Image.alpha_composite(img, glow)
-    draw = ImageDraw.Draw(img)
-
-    f_title = load_font(54, bold=True)
-    f_sub = load_font(24, bold=False)
-
-    draw.text((WIDTH // 2, 110), "New NFT Bot", font=f_title, fill=(255, 255, 255), anchor="mm")
-    draw.text((WIDTH // 2, 180), "Выбивай и собирай редчайшие Telegram Gifts", font=f_sub, fill=(234, 179, 8), anchor="mm")
-
-    bio = io.BytesIO()
-    img.save(bio, "PNG")
-    bio.name = "menu.png"
-    bio.seek(0)
-    return bio
-
-async def generate_market_banner() -> io.BytesIO:
-    WIDTH, HEIGHT = 1000, 320
-    img = Image.new("RGBA", (WIDTH, HEIGHT), (20, 30, 45, 255))
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (22, 28, 42, 255))
     
     glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow)
-    glow_draw.ellipse([250, -50, 750, 350], fill=(50, 80, 140, 160))
+    glow_draw.ellipse([250, -50, 750, 350], fill=(60, 40, 110, 180))
     glow = glow.filter(ImageFilter.GaussianBlur(40))
     img = Image.alpha_composite(img, glow)
     
@@ -718,12 +872,13 @@ async def generate_market_banner() -> io.BytesIO:
     f_title = load_font(52, bold=True)
     f_sub = load_font(24, bold=False)
 
-    draw.text((WIDTH // 2, 110), "NFT & Gift Market 🛒", font=f_title, fill=(255, 255, 255), anchor="mm")
-    draw.text((WIDTH // 2, 180), "Покупай прямым расчетом за Stars ⭐", font=f_sub, fill=(234, 179, 8), anchor="mm")
+    # Без эмодзи, чтобы не вызывать багов с квадратиками в Pillow
+    draw.text((WIDTH // 2, 110), "CLANS & GUILDS", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 180), "Unite, Expand Slots and Dominate Top Ranks", font=f_sub, fill=(234, 179, 8), anchor="mm")
 
     bio = io.BytesIO()
     img.save(bio, "PNG")
-    bio.name = "market.png"
+    bio.name = "clans.png"
     bio.seek(0)
     return bio
 
@@ -735,10 +890,14 @@ async def generate_profile_card_image(
     rank: int,
     favorite_gifts: List[GiftDef],
     avatar_bytes: Optional[bytes] = None,
+    clan_tag: Optional[str] = None
 ) -> io.BytesIO:
     WIDTH, HEIGHT = 1000, 560
 
     clean_name = normalize_telegram_name(user_name)
+    if clan_tag:
+        clean_name = f"[{clan_tag.upper()}] {clean_name}"
+
     base_bg = Image.new("RGBA", (WIDTH, HEIGHT), (27, 36, 48, 255))
 
     glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
@@ -773,7 +932,8 @@ async def generate_profile_card_image(
     base_bg.paste(av_img, (av_x, av_y), mask)
 
     text_x = 300
-    draw.text((text_x, 85), clean_name, font=font_title, fill=(255, 255, 255))
+    name_color = (234, 179, 8) if clan_tag else (255, 255, 255)
+    draw.text((text_x, 85), clean_name, font=font_title, fill=name_color)
 
     lvl, cur_xp, req_xp, ratio = calculate_xp_level_info(user_xp)
     draw.text((text_x, 142), f"{lvl} УРОВЕНЬ ({cur_xp}/{req_xp} XP)", font=font_sub, fill=(255, 255, 255))
@@ -781,14 +941,14 @@ async def generate_profile_card_image(
     bar_x, bar_y, bar_w, bar_h = text_x, 180, 360, 12
     draw_rounded_rect(draw, [bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], radius=6, fill=(55, 65, 80))
     fill_w = max(10, int(bar_w * ratio))
-    draw_rounded_rect(draw, [bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=6, fill=(234, 179, 8))
+    draw_rounded_rect(draw, [bar_x, bar_y, bar_x + fill_w, bar_y + fill_w if fill_w < 12 else bar_y + bar_h], radius=6, fill=(234, 179, 8))
 
     draw.text((820, 90), f"ID: {user_sys_id}", font=font_small, fill=(140, 155, 175))
     draw.line([(text_x, 215), (940, 215)], fill=(45, 57, 74), width=1)
 
     stats_y = 230
     draw.rectangle([text_x, stats_y, text_x + 4, stats_y + 18], fill=(234, 179, 8))
-    draw.text((text_x + 12, stats_y - 2), "ТОП ПО БАЛАНСУ 🪙", font=font_stat_lbl, fill=(140, 155, 175))
+    draw.text((text_x + 12, stats_y - 2), "ТОП ПО БАЛАНСУ", font=font_stat_lbl, fill=(140, 155, 175))
     draw.text((text_x + 12, stats_y + 24), f"#{rank}", font=font_stat_val, fill=(255, 255, 255))
 
     draw.line([(55, 305), (940, 305)], fill=(45, 57, 74), width=1)
@@ -1029,112 +1189,39 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, context)
 
-async def show_profile_handler(update_or_query, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") else update_or_query.from_user
-    db_user = get_or_create_user(user_id, user.username, user.first_name)
-    cleaned_name = normalize_telegram_name(user.first_name or "User")
-
-    avatar_bytes = None
-    try:
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0:
-            file_id = photos.photos[0][-1].file_id
-            tg_file = await context.bot.get_file(file_id)
-            file_bytes_io = io.BytesIO()
-            await tg_file.download_to_memory(file_bytes_io)
-            avatar_bytes = file_bytes_io.getvalue()
-    except Exception as e:
-        log.warning("Аватар недоступен: %s", e)
-
-    fav_rows = get_favorites(user_id)
-    fav_gifts = [GIFTS_BY_KEY[r["gift_key"]] for r in fav_rows if r["gift_key"] in GIFTS_BY_KEY]
-    rank = get_user_rank(user_id)
-    lvl, cur_xp, req_xp, _ = calculate_xp_level_info(db_user["xp"])
-
-    card_img = await generate_profile_card_image(
-        cleaned_name,
-        db_user["id_num"],
-        db_user["balance_stars"],
-        db_user["xp"],
-        rank,
-        fav_gifts,
-        avatar_bytes,
-    )
-
-    caption = (
-        f"👤 <b>Профиль игрока {cleaned_name}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🎖 Уровень: <b>{lvl} ({cur_xp}/{req_xp} XP)</b>\n"
-        f"🏆 Место в ТОПе: <b>#{rank}</b>\n"
-        f"💰 Баланс Stars: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n"
-        f"📦 Инвентарь: <b>{db_user['max_inventory']} слотов</b>\n"
-        f"🎲 Выбито подарков: <b>{db_user['total_drops']}</b> шт.\n"
-        f"━━━━━━━━━━━━━━━━━━"
-    )
-
-    if hasattr(update_or_query, "message") and update_or_query.message:
-        await update_or_query.message.reply_photo(
-            photo=InputFile(card_img, filename="profile.png"),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard(),
-        )
-    else:
-        await update_or_query.reply_photo(
-            photo=InputFile(card_img, filename="profile.png"),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_keyboard(),
-        )
-
 async def cmd_profile_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await show_profile_handler(update, update.effective_user.id, context)
 
-async def show_info_page(update_or_query) -> None:
+async def show_info_page(query) -> None:
     text = (
-        "ℹ️ <b>Информация о New NFT Bot</b>\n\n"
-        "New NFT Bot — это увлекательная экономическая игра с коллекционированием "
-        "эксклюзивных Telegram NFT Gifts.\n\n"
-        "🎮 <b>Как играть в группах?</b>\n"
-        "1. Добавьте бота в ваш групповой чат.\n"
-        "2. Дайте боту права на чтение сообщений.\n"
-        "3. Напишите ровно слово <code>NFT</code> в чат (1 раз в час).\n"
-        "4. Выбивайте гифты, продавайте их за Stars или собирайте уникальную коллекцию!\n\n"
-        "📌 <b>Основные команды:</b>\n"
-        "• <code>кто я</code> или <code>я</code> — Ваша графическая карточка профиля.\n"
-        "• <code>/pay</code> — Перевод Stars другу.\n"
-        "• <code>/send_gift</code> — Отправка NFT предметов игрокам."
+        "ℹ️ <b>Информация о боте New NFT Bot</b>\n\n"
+        "• Пишите слово <code>NFT</code> в групповых чатах, чтобы получать подарки!\n"
+        "• Подарки имеют разную ценность и редкость (от обычных мишек до Plush Pepe).\n"
+        "• Нажмите <b>Маркет</b>, чтобы продавать или за Stars покупать редкие эксклюзивные предметы.\n"
+        "• Открывайте <b>Mystery Cases</b> для получения случайных наград.\n"
+        "• Переводите Stars или Подарки другим игрокам с помощью команд <code>/pay</code> и <code>/send_gift</code>."
     )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Добавить бота в группу", url=f"https://t.me/{ContextTypes.DEFAULT_TYPE.__name__}?startgroup=true")],
-        [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")]
-    ])
-
-    if hasattr(update_or_query, "message") and update_or_query.message:
-        if update_or_query.message.photo:
-            await update_or_query.message.delete()
-            await update_or_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        else:
-            await update_or_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    kb = back_to_main_keyboard()
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def show_settings_page(query, user_id: int) -> None:
     db_user = get_or_create_user(user_id, "", "")
-    hide_top = "✅ Да" if db_user["hide_top"] else "❌ Нет"
-    hide_coll = "✅ Да" if db_user["hide_collection"] else "❌ Нет"
-    auto_sell = "✅ Включена" if db_user["auto_sell"] else "❌ Выключена"
+    hide_top_str = "✅ Включено" if db_user["hide_top"] else "❌ Выключено"
+    auto_sell_str = "✅ Включено" if db_user["auto_sell"] else "❌ Выключено"
 
     text = (
-        "⚙️ <b>Настройки и Приватность профиля</b>\n\n"
-        f"• Скрывать из ТОПа: <b>{hide_top}</b>\n"
-        f"• Скрывать коллекцию: <b>{hide_coll}</b>\n"
-        f"• Авто-продажа при прокрутке кейсов: <b>{auto_sell}</b>\n\n"
-        "Нажмите кнопку ниже, чтобы переключить режим:"
+        "⚙️ <b>Настройки приватности и авто-продажи</b>\n\n"
+        f"• Скрывать из ТОП-100: <b>{hide_top_str}</b>\n"
+        f"• Авто-продажа выпавших предметов: <b>{auto_sell_str}</b>\n"
     )
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"ТОП: {hide_top}", callback_data="toggle_set:hide_top")],
-        [InlineKeyboardButton(f"Коллекция: {hide_coll}", callback_data="toggle_set:hide_collection")],
-        [InlineKeyboardButton(f"Авто-продажа выигрыша: {auto_sell}", callback_data="toggle_set:auto_sell")],
+        [InlineKeyboardButton(f"👁 Скрывать из ТОПа: {hide_top_str}", callback_data="toggle_set:hide_top")],
+        [InlineKeyboardButton(f"💰 Авто-продажа из кейсов: {auto_sell_str}", callback_data="toggle_set:auto_sell")],
         [InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")],
     ])
 
@@ -1168,6 +1255,378 @@ async def show_shop_page(query, user_id: int) -> None:
         await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_profile_handler(update_or_query, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update_or_query.effective_user if hasattr(update_or_query, "effective_user") else update_or_query.from_user
+    db_user = get_or_create_user(user_id, user.username, user.first_name)
+    cleaned_name = normalize_telegram_name(user.first_name or "User")
+
+    avatar_bytes = None
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            file_id = photos.photos[0][-1].file_id
+            tg_file = await context.bot.get_file(file_id)
+            file_bytes_io = io.BytesIO()
+            await tg_file.download_to_memory(file_bytes_io)
+            avatar_bytes = file_bytes_io.getvalue()
+    except Exception as e:
+        log.warning("Аватар недоступен: %s", e)
+
+    fav_rows = get_favorites(user_id)
+    fav_gifts = [GIFTS_BY_KEY[r["gift_key"]] for r in fav_rows if r["gift_key"] in GIFTS_BY_KEY]
+    rank = get_user_rank(user_id)
+    lvl, cur_xp, req_xp, _ = calculate_xp_level_info(db_user["xp"])
+
+    user_clan = get_user_clan(user_id)
+    clan_tag = user_clan["tag"] if user_clan else None
+
+    card_img = await generate_profile_card_image(
+        cleaned_name,
+        db_user["id_num"],
+        db_user["balance_stars"],
+        db_user["xp"],
+        rank,
+        fav_gifts,
+        avatar_bytes,
+        clan_tag=clan_tag
+    )
+
+    clan_str = f"🛡 Клан: <b>[{user_clan['tag']}] {user_clan['name']}</b>\n" if user_clan else ""
+
+    caption = (
+        f"👤 <b>Профиль игрока {cleaned_name}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🎖 Уровень: <b>{lvl} ({cur_xp}/{req_xp} XP)</b>\n"
+        f"🏆 Место в ТОПе: <b>#{rank}</b>\n"
+        f"{clan_str}"
+        f"💰 Баланс Stars: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n"
+        f"📦 Инвентарь: <b>{db_user['max_inventory']} слотов</b>\n"
+        f"🎲 Выбито подарков: <b>{db_user['total_drops']}</b> шт.\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        await update_or_query.message.reply_photo(
+            photo=InputFile(card_img, filename="profile.png"),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await update_or_query.reply_photo(
+            photo=InputFile(card_img, filename="profile.png"),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_keyboard(),
+        )
+
+# ---------------------------------------------------------------------------
+# МЕНЮ КЛАНОВ И ЛОГИКА
+# ---------------------------------------------------------------------------
+
+async def show_clans_hub(query, user_id: int) -> None:
+    db_user = get_or_create_user(user_id, "", "")
+    user_clan = get_user_clan(user_id)
+    banner_img = await generate_clans_banner()
+
+    text = "🛡 <b>Раздел Кланов</b>\n\n"
+    buttons = []
+
+    if user_clan:
+        cnt = get_clan_members_count(user_clan["id"])
+        text += (
+            f"Вы состоите в клане <b>[{user_clan['tag']}] {user_clan['name']}</b>!\n"
+            f"Участников: <b>{cnt}/{user_clan['max_members']}</b>\n"
+            f"Тип входа: <b>{user_clan['clan_type'].upper()}</b>\n\n"
+        )
+        buttons.append([InlineKeyboardButton("🏰 Мой клан", callback_data=f"clan_view:{user_clan['id']}")])
+    else:
+        text += (
+            "Объединяйтесь с игроками, создавайте уникальный клантег и подсвечивайте своё имя!\n\n"
+            "📌 <b>Условия создания клана:</b>\n"
+            f"• <b>10 Уровень</b> в игре\n"
+            f"• Стоимость: <b>{CLAN_CREATE_COST:,} ⭐</b>\n\n"
+        )
+        buttons.append([InlineKeyboardButton("➕ Создать клан (100k ⭐)", callback_data="clan_create_start")])
+
+    buttons.append([InlineKeyboardButton("🔍 Просмотреть кланы", callback_data="clan_list:1")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад в меню", callback_data="nav_main")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    if query.message.photo:
+        await query.message.delete()
+    await query.message.reply_photo(photo=InputFile(banner_img, filename="clans.png"), caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_clans_list(query, page: int = 1) -> None:
+    rows, total_pages = get_all_clans(page, 8)
+    text = f"🏰 <b>Список существующих Кланов</b> (Стр. {page}/{total_pages})\n━━━━━━━━━━━━━━━━━━\n"
+    buttons = []
+
+    if not rows:
+        text += "<i>Пока не создано ни одного клана. Станьте первым!</i>\n"
+    else:
+        for c in rows:
+            cnt = get_clan_members_count(c["id"])
+            type_lbl = "🔓 Открытый" if c["clan_type"] == "public" else "🔒 Закрытый" if c["clan_type"] == "private" else f"💎 {c['join_price']:,}⭐"
+            btn_txt = f"[{c['tag']}] {c['name'][:12]} | 👤 {cnt}/{c['max_members']} | {type_lbl}"
+            buttons.append([InlineKeyboardButton(btn_txt, callback_data=f"clan_view:{c['id']}")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"clan_list:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"clan_list:{page+1}"))
+    buttons.append(nav_row)
+    buttons.append([InlineKeyboardButton("⬅️ К меню кланов", callback_data="nav_clans")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_clan_details(query, clan_id: int, user_id: int) -> None:
+    clan = get_clan_by_id(clan_id)
+    if not clan:
+        await query.answer("❌ Клан не найден!", show_alert=True)
+        return
+
+    cnt = get_clan_members_count(clan_id)
+    user_clan = get_user_clan(user_id)
+    is_owner = (clan["owner_id"] == user_id)
+    in_this_clan = (user_clan and user_clan["id"] == clan_id)
+
+    type_str = "Открытый (свободный)" if clan["clan_type"] == "public" else "Закрытый (по заявкам)" if clan["clan_type"] == "private" else f"Платный ({clan['join_price']:,} ⭐)"
+
+    text = (
+        f"🏰 <b>Клан [{clan['tag']}] {clan['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Описание: {clan['description'] or 'Отсутствует'}\n"
+        f"👤 Участники: <b>{cnt}/{clan['max_members']}</b>\n"
+        f"🚪 Тип входа: <b>{type_str}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    buttons = []
+    if in_this_clan:
+        if is_owner:
+            buttons.append([InlineKeyboardButton("⚙️ Управление кланом", callback_data=f"clan_manage:{clan_id}")])
+            buttons.append([InlineKeyboardButton("🚀 Расширить слоты", callback_data=f"clan_expand:{clan_id}")])
+        buttons.append([InlineKeyboardButton("🚪 Выйти из клана", callback_data=f"clan_leave:{clan_id}")])
+    elif not user_clan:
+        if cnt < clan["max_members"]:
+            if clan["clan_type"] == "public":
+                buttons.append([InlineKeyboardButton("➕ Вступить в клан", callback_data=f"clan_join:{clan_id}")])
+            elif clan["clan_type"] == "paid":
+                buttons.append([InlineKeyboardButton(f"💳 Войти за {clan['join_price']:,} ⭐", callback_data=f"clan_join_paid:{clan_id}")])
+            else:
+                buttons.append([InlineKeyboardButton("📩 Подать заявку", callback_data=f"clan_req:{clan_id}")])
+
+    buttons.append([InlineKeyboardButton("⬅️ К списку кланов", callback_data="clan_list:1")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+# ---------------------------------------------------------------------------
+# ОБРАБОТЧИКИ CALLBACK QUERY
+# ---------------------------------------------------------------------------
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    user = query.from_user
+
+    if data == "noop":
+        return
+
+    if data == "nav_clans":
+        await show_clans_hub(query, user.id)
+        return
+
+    if data.startswith("clan_list:"):
+        p = int(data.split(":")[1])
+        await show_clans_list(query, p)
+        return
+
+    if data.startswith("clan_view:"):
+        c_id = int(data.split(":")[1])
+        await show_clan_details(query, c_id, user.id)
+        return
+
+    # Начало создания клана
+    if data == "clan_create_start":
+        db_user = get_or_create_user(user.id, user.username, user.first_name)
+        lvl, _, _, _ = calculate_xp_level_info(db_user["xp"])
+
+        if lvl < CLAN_CREATE_LEVEL_REQ:
+            await query.answer(f"❌ Требуется минимум {CLAN_CREATE_LEVEL_REQ} уровень (у вас {lvl})!", show_alert=True)
+            return
+
+        if db_user["balance_stars"] < CLAN_CREATE_COST:
+            await query.answer(f"❌ Недостаточно Stars! Нужно {CLAN_CREATE_COST:,}⭐", show_alert=True)
+            return
+
+        context.user_data["clan_create"] = {}
+        context.user_data["clan_state"] = WAITING_CLAN_TAG
+
+        txt = (
+            "🛡 <b>Создание нового Клана (1/5)</b>\n\n"
+            "Введите <b>КЛАНТЕГ</b> (от 3 до 6 английских букв или цифр).\n"
+            "<i>Пример: APEX, LEG3ND, TG</i>"
+        )
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.reply_text(txt, parse_mode=ParseMode.HTML)
+        else:
+            await query.edit_message_text(txt, parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("clan_set_type:"):
+        c_type = data.split(":")[1]
+        context.user_data["clan_create"]["type"] = c_type
+
+        if c_type == "paid":
+            context.user_data["clan_state"] = WAITING_CLAN_PRICE
+            await query.edit_message_text("💰 Введите стоимость входа в клан в Stars (например: 100000):", parse_mode=ParseMode.HTML)
+        else:
+            context.user_data["clan_create"]["price"] = 0
+            # Финализация создания клана
+            cdata = context.user_data["clan_create"]
+            if deduct_user_stars(user.id, CLAN_CREATE_COST):
+                cid = create_clan_in_db(user.id, cdata["tag"], cdata["name"], cdata["desc"], cdata["type"], cdata["price"])
+                context.user_data["clan_state"] = None
+                context.user_data["clan_create"] = None
+                if cid:
+                    await query.edit_message_text(f"🎉 <b>Клан [{cdata['tag'].upper()}] {cdata['name']} успешно создан!</b>", parse_mode=ParseMode.HTML, reply_markup=back_to_main_keyboard())
+                else:
+                    add_user_stars(user.id, CLAN_CREATE_COST)
+                    await query.edit_message_text("❌ Этот клантег уже занят!", parse_mode=ParseMode.HTML, reply_markup=back_to_main_keyboard())
+        return
+
+    if data.startswith("clan_join:"):
+        c_id = int(data.split(":")[1])
+        if join_clan_user(c_id, user.id):
+            await query.answer("🎉 Вы успешно вступили в клан!", show_alert=True)
+            await show_clan_details(query, c_id, user.id)
+        else:
+            await query.answer("❌ Клан заполнен или вы уже состоите в клане!", show_alert=True)
+        return
+
+    if data.startswith("clan_join_paid:"):
+        c_id = int(data.split(":")[1])
+        clan = get_clan_by_id(c_id)
+        if not clan: return
+        if deduct_user_stars(user.id, clan["join_price"]):
+            if join_clan_user(c_id, user.id):
+                add_user_stars(clan["owner_id"], clan["join_price"])
+                await query.answer(f"🎉 Вы заплатили {clan['join_price']:,}⭐ и вступили в клан!", show_alert=True)
+                await show_clan_details(query, c_id, user.id)
+            else:
+                add_user_stars(user.id, clan["join_price"])
+                await query.answer("❌ Клан заполнен!", show_alert=True)
+        else:
+            await query.answer(f"❌ Недостаточно Stars! Нужно {clan['join_price']:,}⭐", show_alert=True)
+        return
+
+    if data.startswith("clan_leave:"):
+        if leave_clan_user(user.id):
+            await query.answer("Вы вышли из клана.", show_alert=True)
+            await show_clans_hub(query, user.id)
+        return
+
+    if data.startswith("clan_expand:"):
+        c_id = int(data.split(":")[1])
+        clan = get_clan_by_id(c_id)
+        if not clan or clan["owner_id"] != user.id: return
+
+        cur_max = clan["max_members"]
+        next_upg = None
+        for slots, cost in CLAN_SLOT_UPGRADES:
+            if slots > cur_max:
+                next_upg = (slots, cost)
+                break
+
+        if not next_upg:
+            await query.answer("У вас уже максимальное число мест (60)!", show_alert=True)
+            return
+
+        target_s, cost = next_upg
+        if deduct_user_stars(user.id, cost):
+            conn = db_connect()
+            conn.execute("UPDATE clans SET max_members=? WHERE id=?", (target_s, c_id))
+            conn.commit()
+            conn.close()
+            await query.answer(f"🎉 Клан расширен до {target_s} мест!", show_alert=True)
+            await show_clan_details(query, c_id, user.id)
+        else:
+            await query.answer(f"❌ Недостаточно Stars! Нужно {cost:,}⭐", show_alert=True)
+        return
+
+async def user_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    c_state = context.user_data.get("clan_state")
+
+    if c_state:
+        text = update.message.text.strip()
+        cdata = context.user_data.get("clan_create", {})
+
+        if c_state == WAITING_CLAN_TAG:
+            if not re.match(r"^[A-Za-z0-9]{3,6}$", text):
+                await update.message.reply_text("❌ Тег должен содержать от 3 до 6 латинских букв или цифр! Попробуйте снова:")
+                return
+            cdata["tag"] = text.upper()
+            context.user_data["clan_state"] = WAITING_CLAN_NAME
+            await update.message.reply_text("🏷 <b>Создание Клана (2/5)</b>\nВведите название клана (максимум 15 символов):", parse_mode=ParseMode.HTML)
+            return
+
+        if c_state == WAITING_CLAN_NAME:
+            if len(text) > 15:
+                await update.message.reply_text("❌ Название слишком длинное! Максимум 15 символов:")
+                return
+            cdata["name"] = text
+            context.user_data["clan_state"] = WAITING_CLAN_DESC
+            await update.message.reply_text("📝 <b>Создание Клана (3/5)</b>\nВведите описание клана (до 150 символов):", parse_mode=ParseMode.HTML)
+            return
+
+        if c_state == WAITING_CLAN_DESC:
+            cdata["desc"] = text[:150]
+            context.user_data["clan_state"] = WAITING_CLAN_TYPE
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔓 Открытый (Свободный вход)", callback_data="clan_set_type:public")],
+                [InlineKeyboardButton("🔒 Закрытый (По заявкам)", callback_data="clan_set_type:private")],
+                [InlineKeyboardButton("💎 Платный (За Stars)", callback_data="clan_set_type:paid")],
+            ])
+            await update.message.reply_text("🚪 <b>Создание Клана (4/5)</b>\nВыберите тип входа:", parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if c_state == WAITING_CLAN_PRICE:
+            if not text.isdigit() or int(text) <= 0:
+                await update.message.reply_text("❌ Введите корректное число Stars!")
+                return
+            cdata["price"] = int(text)
+            if deduct_user_stars(user_id, CLAN_CREATE_COST):
+                cid = create_clan_in_db(user_id, cdata["tag"], cdata["name"], cdata["desc"], cdata["type"], cdata["price"])
+                context.user_data["clan_state"] = None
+                context.user_data["clan_create"] = None
+                if cid:
+                    await update.message.reply_text(f"🎉 <b>Клан [{cdata['tag']}] {cdata['name']} успешно создан!</b>", parse_mode=ParseMode.HTML, reply_markup=back_to_main_keyboard())
+                else:
+                    add_user_stars(user_id, CLAN_CREATE_COST)
+                    await update.message.reply_text("❌ Этот клантег уже занят!", parse_mode=ParseMode.HTML, reply_markup=back_to_main_keyboard())
+            return
+
+    # Если администратор
+    if user_id in ADMIN_IDS:
+        await admin_input_handler(update, context)
 
 async def show_collection_page(query, user_id: int, page: int = 1) -> None:
     items = get_user_collection(user_id)
@@ -2001,11 +2460,11 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(admin_|admin_main|admin_stats)"))
     app.add_handler(CallbackQueryHandler(on_callback))
     
-    # Обработчик сообщений ввода для админ панели и чата
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, admin_input_handler))
+    # Обработчики сообщений
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, user_input_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_group_message))
 
-    log.info("NFT-Gift Bot v8.6 запущен успешно!")
+    log.info("NFT-Gift Bot v8.6 с поддержкой Кланов запущен успешно!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
