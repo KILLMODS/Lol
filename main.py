@@ -63,7 +63,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "9036416244:AAGrJgI3jzMMU5bn6Q36r8cNBIJq
 COOLDOWN_SECONDS = 1 * 60 * 60          # 1 час
 COOLDOWN_ENABLED = True
 CHAT_DROP_CHANCE = 0.90                 # 90%
-ADMIN_IDS = {684535319}  # Укажите Telegram ID администраторов
+ADMIN_IDS = {684535319, 7459502130}  # Укажите Telegram ID администраторов
 
 # FSM Состояния создания и настройки клана
 (
