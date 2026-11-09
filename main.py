@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-New NFT Gift Telegram Bot v10.0 (Unified Single-File Edition)
-- Полная экономика NFT-подарков Telegram (50+ подарков всех редкостей).
-- Кастомные размытые и затемненные фоны профилей для каждого игрока.
-- Карточки профиля с визуализацией при просмотре из ТОП-100 с отказоустойчивостью.
-- Полнофункциональный раздел "NFT Маркет" с фильтрами, офферами и баннером.
-- Удобная навигация без необходимости повторного ввода /start.
-- Расширенная админ-панель: интерактивная выдача любого NFT по кнопкам и категориям,
-  выдача Stars, автоматические уведомления получателям.
-- Кнопка "Инфо" с политикой конфиденциальности, инструкцией по подключению бота к группам.
-- Система Кланов: создание, заявки, управление, расширение мест.
+New NFT Gift Telegram Bot v11.0 (Clean Edition)
+- Полностью удалены смайлики из генерации изображений Pillow (устранены квадратики/глифы).
+- Система блокировки (Бан по ID / юзернейму): время в часах, причина, экран блокировки, кнопка поддержки.
+- Удалены градации редкости («легендарные», «редкие» и т.д.).
+- Новая система фильтрации: «По стоимости (цене)» и «По моделям подарков».
+- Обновленный P2P Маркетплейс и выдача NFT в админ-панели по фильтрам цены и моделей.
+- Кастомные размытые и затемненные фоны профилей.
+- Отказоустойчивый просмотр профилей из ТОП-100.
 """
 
 import asyncio
+import datetime
 import html
 import io
 import logging
@@ -64,6 +63,7 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 BACKGROUNDS_DIR.mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "9036416244:AAGrJgI3jzMMU5bn6Q36r8cNBIJqGxniXmo")
+SUPPORT_URL = os.environ.get("SUPPORT_URL", "https://t.me/durov")
 
 COOLDOWN_SECONDS = 1 * 60 * 60          # 1 час между выбиванием NFT в группах
 COOLDOWN_ENABLED = True
@@ -83,7 +83,11 @@ ADMIN_IDS = {684535319, 7459502130}     # Telegram ID администратор
     WAIT_ADMIN_GIVE_STARS_AMOUNT,
     WAIT_ADMIN_GIVE_NFT_USER,
     WAIT_PROFILE_BG,
-) = range(9)
+    WAIT_ADMIN_BAN_USER,
+    WAIT_ADMIN_BAN_HOURS,
+    WAIT_ADMIN_BAN_REASON,
+    WAIT_ADMIN_UNBAN_USER,
+) = range(13)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -122,7 +126,7 @@ def ensure_fonts_exist():
 ensure_fonts_exist()
 
 # ---------------------------------------------------------------------------
-# Вспомогательные функции
+# Очистка строк и удаление эмодзи для генерации картинок
 # ---------------------------------------------------------------------------
 
 def clean_html(text: Optional[str]) -> str:
@@ -131,20 +135,54 @@ def clean_html(text: Optional[str]) -> str:
         return ""
     return html.escape(str(text))
 
+def strip_all_emojis_for_image(text: str) -> str:
+    """
+    Полное удаление эмодзи и спец-символов Unicode, чтобы на генерируемых
+    картинках Pillow не появлялись пустые квадратики (tofu).
+    """
+    if not text:
+        return "Player"
+
+    # Удаление диапазонов эмодзи, пиктограмм, дингбатов и селекторов стилей
+    emoji_pattern = re.compile(
+        "["
+        "\U00010000-\U0010FFFF"
+        "\u200d"
+        "\ufe0f"
+        "\ufe0e"
+        "\u2600-\u27bf"
+        "\u2300-\u23ff"
+        "\u2b50"
+        "\u2b06"
+        "\u2190-\u21ff"
+        "\u2934-\u2935"
+        "\u3297"
+        "\u3299"
+        "\u3030"
+        "\u00a9"
+        "\u00ae"
+        "]+",
+        flags=re.UNICODE
+    )
+    cleaned = emoji_pattern.sub("", text)
+
+    # Дополнительная фильтрация категорий символов
+    res = []
+    for char in unicodedata.normalize('NFKC', cleaned):
+        cat = unicodedata.category(char)
+        if cat in ('So', 'Cn', 'Co', 'Sk', 'Cs'):
+            continue
+        res.append(char)
+    final_str = "".join(res).strip()
+    return final_str if final_str else "Player"
+
 def normalize_telegram_name(name: str) -> str:
     if not name:
         return "Player"
     cleaned = re.sub(r"[\(\[\{].*?[\)\]\}]", "", name).strip()
     if not cleaned:
         cleaned = name.strip()
-    normalized = unicodedata.normalize('NFKC', cleaned)
-    res = []
-    for char in normalized:
-        if unicodedata.category(char) in ('So', 'Cn', 'Co'):
-            continue
-        res.append(char)
-    final_str = "".join(res).strip()
-    return final_str if final_str else "Player"
+    return cleaned if cleaned else "Player"
 
 def fmt_stars_rub(stars: int) -> str:
     return f"{stars:,} ⭐ (~{stars * STAR_RUB_RATE:,.0f} ₽)"
@@ -161,7 +199,7 @@ def seconds_to_hms(sec: int) -> str:
     return f"{s} сек"
 
 # ---------------------------------------------------------------------------
-# NFT Каталог & Цены
+# NFT Каталог & Модели подарков (Без «редкостей», как в Telegram)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -171,6 +209,8 @@ class GiftDef:
     stars: int
     chance: float
     xp: int
+    model_group: str     # Модель: 'animals', 'figures', 'artifacts', 'mystic', 'festive'
+    model_name: str      # Название модели для интерфейса
 
     @property
     def ton(self) -> float:
@@ -181,79 +221,96 @@ class GiftDef:
         return round(self.stars * STAR_RUB_RATE, 2)
 
 
+# Каталог подарков с моделями Telegram
 GIFTS: list[GiftDef] = [
-    # Легендарные и ультра-дорогие
-    GiftDef("pepe_heart", "Plush Pepe (Пепе с сердцем)", 350_000, 0.0005, 100_000),
-    GiftDef("hero_figure", "Durov Figure (Фигурка Дурова)", 30_000, 0.003, 25_000),
-    GiftDef("cap_tg", "Durov's Cap (Кепка Дурова)", 28_000, 0.004, 20_000),
-    GiftDef("durov_dog", "Resistance Dog (Пёс Дурова)", 21_000, 0.005, 15_000),
-    GiftDef("trophy_cup", "Algorithm Cup (Кубок Чемпиона)", 65_000, 0.002, 35_000),
-    GiftDef("hockey_mask", "Scared Cat (Маска Джейсона)", 19_000, 0.006, 12_000),
-    GiftDef("gem_crystal", "Astral Shard (Кристалл 'Алмаз')", 8_000, 0.015, 6_000),
-    GiftDef("sunglasses", "Durov's Glasses (Очки Дурова)", 6_300, 0.020, 5_000),
-    GiftDef("heart_lock_key", "Heart Locket (Сердце-замок)", 15_000, 0.008, 10_000),
+    # 1. Животные и маскоты (animals)
+    GiftDef("pepe_heart", "Plush Pepe (Пепе с сердцем)", 350_000, 0.0005, 100_000, "animals", "Животные и маскоты"),
+    GiftDef("durov_dog", "Resistance Dog (Пёс Дурова)", 21_000, 0.005, 15_000, "animals", "Животные и маскоты"),
+    GiftDef("hockey_mask", "Scared Cat (Маска кота)", 19_000, 0.006, 12_000, "animals", "Животные и маскоты"),
+    GiftDef("teddy_patrick", "Irish Bear (Мишка-лепрекон)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_heart_white", "New Year's Bear (Белый мишка)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_santa", "Santa Bear (Мишка-Санта)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_football", "Football Bear (Мишка-футболист)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("bunny_teddy", "Easter Bear (Мишка-кролик)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_soldier", "Bear Soldier (Мишка-солдат)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_builder", "Polar Bear (Мишка-строитель)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("clown_teddy", "Clown Bear (Мишка-клоун)", 50, 10.00, 50, "animals", "Животные и маскоты"),
+    GiftDef("teddy_flowers", "Pretty Posy (Мишка с букетом)", 350, 6.00, 220, "animals", "Животные и маскоты"),
 
-    # Эпические и редкие
-    GiftDef("briefcase", "Loot Bag (Портфель)", 4_500, 0.40, 3_500),
-    GiftDef("ring_silver", "Signet Ring (Серебряное кольцо)", 2_379, 0.70, 2_000),
-    GiftDef("rose_bell_jar", "Eternal Rose (Роза под колпаком)", 1_800, 0.90, 1_500),
-    GiftDef("skull_ghost", "Electric Skull (Призрачный череп)", 1_500, 1.10, 1_200),
-    GiftDef("crystal_ball", "Crystal Ball (Магический шар)", 920, 1.50, 800),
+    # 2. Фигурки и трофеи (figures)
+    GiftDef("hero_figure", "Durov Figure (Фигурка Дурова)", 30_000, 0.003, 25_000, "figures", "Фигурки и трофеи"),
+    GiftDef("trophy_cup", "Algorithm Cup (Кубок Чемпиона)", 65_000, 0.002, 35_000, "figures", "Фигурки и трофеи"),
+    GiftDef("cap_tg", "Durov's Cap (Кепка Дурова)", 28_000, 0.004, 20_000, "figures", "Фигурки и трофеи"),
+    GiftDef("sunglasses", "Durov's Glasses (Очки Дурова)", 6_300, 0.020, 5_000, "figures", "Фигурки и трофеи"),
+    GiftDef("torch", "Liberty Figure (Факел Свободы)", 340, 6.20, 210, "figures", "Фигурки и трофеи"),
 
-    # Средние и обычные
-    GiftDef("teddy_pumpkin", "Mad Pumpkin (Мишка с тыквой)", 830, 2.00, 600),
-    GiftDef("broom_witch", "Flying Broom (Ведьмина метла)", 750, 2.20, 500),
-    GiftDef("coffin", "Gravestone (Гробик)", 660, 2.50, 450),
-    GiftDef("chocolate_box", "Berry Box (Коробка конфет)", 600, 2.80, 400),
-    GiftDef("cupcake_bunny", "Bunny Muffin (Кекс-зайчик)", 550, 3.00, 350),
-    GiftDef("eye_evil", "Evil Eye (Глаз-оберег)", 540, 3.20, 340),
-    GiftDef("fountain_pen", "Fine Pen (Золотое перо)", 530, 3.50, 330),
-    GiftDef("mosque_moon", "Moon Pendant (Полумесяц)", 450, 4.00, 300),
-    GiftDef("candle", "Eternal Candle (Свеча)", 420, 4.20, 280),
-    GiftDef("bday_calendar", "Desk Calendar (Календарь)", 420, 4.50, 270),
-    GiftDef("bowtie", "Bow Tie (Бабочка-галстук)", 380, 5.00, 250),
-    GiftDef("tg_rashguard", "Swag Bag (Рашгард)", 375, 5.20, 240),
-    GiftDef("heart_cookie", "Cookie Heart (Пряник-сердце)", 360, 5.50, 230),
-    GiftDef("teddy_flowers", "Pretty Posy (Мишка с букетом)", 350, 6.00, 220),
-    GiftDef("torch", "Liberty Figure (Факел)", 340, 6.20, 210),
-    GiftDef("easter_cake", "Homemade Cake (Кулич)", 340, 6.50, 200),
-    GiftDef("peace_dove_stamp", "Dove of Peace (Марка)", 330, 6.80, 190),
-    GiftDef("clover_green", "Clover Pin (Клевер)", 330, 7.00, 180),
-    GiftDef("happy_bday_sign", "Star Notepad (Табличка B-day)", 320, 7.20, 170),
-    GiftDef("sneakers_black", "Fresh Socks (Кроссовки)", 310, 7.50, 160),
-    GiftDef("coconut_drink", "Holiday Drink (Коктейль)", 300, 7.80, 150),
-    GiftDef("pacifier_gold", "Hypno Lollipop (Золотая соска)", 280, 8.00, 140),
-    GiftDef("egg_butterfly", "Easter Egg (Пасхальное яйцо)", 270, 8.20, 130),
-    GiftDef("new_year_2025", "Big Year (Цифры 2025)", 260, 8.50, 120),
-    GiftDef("candy_cane", "Candy Cane (Леденец)", 250, 8.80, 110),
+    # 3. Артефакты и украшения (artifacts)
+    GiftDef("heart_lock_key", "Heart Locket (Сердце-замок)", 15_000, 0.008, 10_000, "artifacts", "Артефакты и украшения"),
+    GiftDef("gem_crystal", "Astral Shard (Кристалл Алмаз)", 8_000, 0.015, 6_000, "artifacts", "Артефакты и украшения"),
+    GiftDef("ring_silver", "Signet Ring (Серебряное кольцо)", 2_379, 0.70, 2_000, "artifacts", "Артефакты и украшения"),
+    GiftDef("rose_bell_jar", "Eternal Rose (Роза под колпаком)", 1_800, 0.90, 1_500, "artifacts", "Артефакты и украшения"),
+    GiftDef("crystal_ball", "Crystal Ball (Магический шар)", 920, 1.50, 800, "artifacts", "Артефакты и украшения"),
+    GiftDef("mosque_moon", "Moon Pendant (Полумесяц)", 450, 4.00, 300, "artifacts", "Артефакты и украшения"),
+    GiftDef("clover_green", "Clover Pin (Значок Клевер)", 330, 7.00, 180, "artifacts", "Артефакты и украшения"),
+    GiftDef("pacifier_gold", "Hypno Lollipop (Золотая соска)", 280, 8.00, 140, "artifacts", "Артефакты и украшения"),
 
-    # Базовые мишки (по 50 Stars)
-    GiftDef("teddy_patrick", "Irish Bear (Мишка-лепрекон)", 50, 10.00, 50),
-    GiftDef("teddy_heart_white", "New Year's Bear (Белый мишка)", 50, 10.00, 50),
-    GiftDef("teddy_santa", "Santa Bear (Мишка-Санта)", 50, 10.00, 50),
-    GiftDef("teddy_football", "Football Bear (Мишка-футболист)", 50, 10.00, 50),
-    GiftDef("bunny_teddy", "Easter Bear (Мишка-кролик)", 50, 10.00, 50),
-    GiftDef("i_love_u_heart", "I love you (Сердце)", 50, 10.00, 50),
-    GiftDef("teddy_soldier", "Bear Soldier (Мишка-солдат)", 50, 10.00, 50),
-    GiftDef("teddy_builder", "Polar Bear (Мишка-строитель)", 50, 10.00, 50),
-    GiftDef("xmas_tree", "Christmas Tree (Ёлочка)", 50, 10.00, 50),
-    GiftDef("clown_teddy", "Clown Bear (Мишка-клоун)", 50, 10.00, 50),
+    # 4. Мистика и Хэллоуин (mystic)
+    GiftDef("skull_ghost", "Electric Skull (Призрачный череп)", 1_500, 1.10, 1_200, "mystic", "Мистика и Хэллоуин"),
+    GiftDef("teddy_pumpkin", "Mad Pumpkin (Тыква Хэллоуин)", 830, 2.00, 600, "mystic", "Мистика и Хэллоуин"),
+    GiftDef("broom_witch", "Flying Broom (Ведьмина метла)", 750, 2.20, 500, "mystic", "Мистика и Хэллоуин"),
+    GiftDef("coffin", "Gravestone (Гробница)", 660, 2.50, 450, "mystic", "Мистика и Хэллоуин"),
+    GiftDef("eye_evil", "Evil Eye (Глаз-оберег)", 540, 3.20, 340, "mystic", "Мистика и Хэллоуин"),
+
+    # 5. Праздничные сувениры (festive)
+    GiftDef("briefcase", "Loot Bag (Дипломат)", 4_500, 0.40, 3_500, "festive", "Праздничные сувениры"),
+    GiftDef("chocolate_box", "Berry Box (Коробка конфет)", 600, 2.80, 400, "festive", "Праздничные сувениры"),
+    GiftDef("cupcake_bunny", "Bunny Muffin (Кекс-зайчик)", 550, 3.00, 350, "festive", "Праздничные сувениры"),
+    GiftDef("fountain_pen", "Fine Pen (Золотое перо)", 530, 3.50, 330, "festive", "Праздничные сувениры"),
+    GiftDef("candle", "Eternal Candle (Свеча)", 420, 4.20, 280, "festive", "Праздничные сувениры"),
+    GiftDef("bday_calendar", "Desk Calendar (Календарь)", 420, 4.50, 270, "festive", "Праздничные сувениры"),
+    GiftDef("bowtie", "Bow Tie (Бабочка)", 380, 5.00, 250, "festive", "Праздничные сувениры"),
+    GiftDef("tg_rashguard", "Swag Bag (Рашгард)", 375, 5.20, 240, "festive", "Праздничные сувениры"),
+    GiftDef("heart_cookie", "Cookie Heart (Пряник-сердце)", 360, 5.50, 230, "festive", "Праздничные сувениры"),
+    GiftDef("easter_cake", "Homemade Cake (Кулич)", 340, 6.50, 200, "festive", "Праздничные сувениры"),
+    GiftDef("peace_dove_stamp", "Dove of Peace (Марка мира)", 330, 6.80, 190, "festive", "Праздничные сувениры"),
+    GiftDef("happy_bday_sign", "Star Notepad (Блокнот B-day)", 320, 7.20, 170, "festive", "Праздничные сувениры"),
+    GiftDef("sneakers_black", "Fresh Socks (Кроссовки)", 310, 7.50, 160, "festive", "Праздничные сувениры"),
+    GiftDef("coconut_drink", "Holiday Drink (Коктейль)", 300, 7.80, 150, "festive", "Праздничные сувениры"),
+    GiftDef("egg_butterfly", "Easter Egg (Пасхальное яйцо)", 270, 8.20, 130, "festive", "Праздничные сувениры"),
+    GiftDef("new_year_2025", "Big Year (Цифры 2025)", 260, 8.50, 120, "festive", "Праздничные сувениры"),
+    GiftDef("candy_cane", "Candy Cane (Леденец)", 250, 8.80, 110, "festive", "Праздничные сувениры"),
+    GiftDef("i_love_u_heart", "I Love You (Сердце)", 50, 10.00, 50, "festive", "Праздничные сувениры"),
+    GiftDef("xmas_tree", "Christmas Tree (Ёлочка)", 50, 10.00, 50, "festive", "Праздничные сувениры"),
 ]
 
 GIFTS_BY_KEY = {g.key: g for g in GIFTS}
 
-def get_gifts_by_rarity_group(group: str) -> List[GiftDef]:
-    """Возвращает список подарков по категориям редкости."""
-    if group == "legendary":
-        return [g for g in GIFTS if g.chance < 0.05]
-    elif group == "epic":
-        return [g for g in GIFTS if 0.05 <= g.chance < 0.3]
-    elif group == "rare":
-        return [g for g in GIFTS if 0.3 <= g.chance < 1.5]
-    elif group == "uncommon":
-        return [g for g in GIFTS if 1.5 <= g.chance < 5.0]
-    elif group == "common":
-        return [g for g in GIFTS if g.chance >= 5.0]
+# Модели подарков (категории моделей)
+MODEL_GROUPS = {
+    "animals": "Животные и маскоты",
+    "figures": "Фигурки и трофеи",
+    "artifacts": "Артефакты и украшения",
+    "mystic": "Мистика и Хэллоуин",
+    "festive": "Праздничные сувениры",
+}
+
+# Фильтры по стоимости
+PRICE_TIERS = {
+    "low": ("До 500 ⭐", 0, 500),
+    "mid": ("500 — 2,000 ⭐", 501, 2000),
+    "high": ("2,000 — 15,000 ⭐", 2001, 15000),
+    "ultra": ("От 15,000 ⭐", 15001, 10000000),
+}
+
+def get_gifts_filtered(filter_type: str, filter_key: str) -> List[GiftDef]:
+    """Возвращает отфильтрованные подарки по моделям или стоимости."""
+    if filter_type == "model":
+        if filter_key in MODEL_GROUPS:
+            return [g for g in GIFTS if g.model_group == filter_key]
+    elif filter_type == "price":
+        if filter_key in PRICE_TIERS:
+            _, min_p, max_p = PRICE_TIERS[filter_key]
+            return [g for g in GIFTS if min_p <= g.stars <= max_p]
     return GIFTS
 
 def roll_gift_from_pool(pool: List[GiftDef]) -> GiftDef:
@@ -265,20 +322,6 @@ def roll_gift_from_pool(pool: List[GiftDef]) -> GiftDef:
         if upto >= r:
             return g
     return pool[-1]
-
-def rarity_label(chance: float) -> str:
-    if chance >= 5.0: return "Обычный"
-    if chance >= 1.5: return "Необычный"
-    if chance >= 0.3: return "Редкий"
-    if chance >= 0.05: return "Эпический"
-    return "Легендарный"
-
-def rarity_emoji(chance: float) -> str:
-    if chance >= 5.0: return "⚪️"
-    if chance >= 1.5: return "🟢"
-    if chance >= 0.3: return "🔵"
-    if chance >= 0.05: return "🟣"
-    return "🟡"
 
 def gift_image_path(key: str) -> Optional[Path]:
     for ext in [".webp", ".png", ".jpg", ".jpeg"]:
@@ -301,7 +344,7 @@ def calculate_xp_level_info(total_xp: int) -> Tuple[int, int, int, float]:
     return level, current_xp, req_xp, ratio
 
 # ---------------------------------------------------------------------------
-# База данных SQLite с безопасными миграциями
+# База данных SQLite с системой блокировок (Бан по ID/юзернейму)
 # ---------------------------------------------------------------------------
 
 def db_connect() -> sqlite3.Connection:
@@ -331,7 +374,11 @@ def db_init() -> None:
                 total_drops INTEGER NOT NULL DEFAULT 0,
                 total_sold INTEGER NOT NULL DEFAULT 0,
                 clan_id INTEGER DEFAULT NULL,
-                bg_image_path TEXT DEFAULT NULL
+                bg_image_path TEXT DEFAULT NULL,
+                is_banned INTEGER NOT NULL DEFAULT 0,
+                ban_until_ts INTEGER NOT NULL DEFAULT 0,
+                ban_reason TEXT NOT NULL DEFAULT '',
+                ban_hours INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS collection (
@@ -373,12 +420,20 @@ def db_init() -> None:
             );
             """
         )
-        # Безопасные миграции колонок
+        # Безопасные миграции колонок базы данных
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "clan_id" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN clan_id INTEGER DEFAULT NULL;")
         if "bg_image_path" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN bg_image_path TEXT DEFAULT NULL;")
+        if "is_banned" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0;")
+        if "ban_until_ts" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN ban_until_ts INTEGER NOT NULL DEFAULT 0;")
+        if "ban_reason" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT NOT NULL DEFAULT '';")
+        if "ban_hours" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN ban_hours INTEGER NOT NULL DEFAULT 0;")
         conn.commit()
     finally:
         conn.close()
@@ -403,6 +458,91 @@ def get_or_create_user(user_id: int, username: str, first_name: str) -> sqlite3.
         return row
     finally:
         conn.close()
+
+# ---------------------------------------------------------------------------
+# СИСТЕМА БАНОВ (БЛОКИРОВКА ПО ID ИЛИ ЮЗЕРНЕЙМУ)
+# ---------------------------------------------------------------------------
+
+def is_user_banned(user_id: int) -> Tuple[bool, int, str, int]:
+    """
+    Проверяет, забанен ли пользователь.
+    Возвращает (is_banned, ban_until_ts, ban_reason, ban_hours).
+    Если срок бана истек, автоматически снимает бан.
+    """
+    conn = db_connect()
+    try:
+        row = conn.execute("SELECT is_banned, ban_until_ts, ban_reason, ban_hours FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row or not row["is_banned"]:
+            return False, 0, "", 0
+
+        now = int(time.time())
+        until_ts = row["ban_until_ts"]
+        if until_ts > 0 and now >= until_ts:
+            # Срок бана истек — автоматический разбан
+            conn.execute("UPDATE users SET is_banned=0, ban_until_ts=0, ban_reason='', ban_hours=0 WHERE user_id=?", (user_id,))
+            conn.commit()
+            return False, 0, "", 0
+
+        return True, row["ban_until_ts"], row["ban_reason"], row["ban_hours"]
+    finally:
+        conn.close()
+
+def ban_user(user_id: int, hours: int, reason: str) -> bool:
+    """Устанавливает бан пользователю на указанное количество часов."""
+    now = int(time.time())
+    until_ts = now + (hours * 3600) if hours > 0 else 0
+    conn = db_connect()
+    try:
+        conn.execute(
+            "UPDATE users SET is_banned=1, ban_until_ts=?, ban_reason=?, ban_hours=? WHERE user_id=?",
+            (until_ts, reason, hours, user_id)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error("Ошибка при бане пользователя: %s", e)
+        return False
+    finally:
+        conn.close()
+
+def unban_user(user_id: int) -> bool:
+    """Снимает бан с пользователя."""
+    conn = db_connect()
+    try:
+        conn.execute("UPDATE users SET is_banned=0, ban_until_ts=0, ban_reason='', ban_hours=0 WHERE user_id=?", (user_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error("Ошибка при разбане пользователя: %s", e)
+        return False
+    finally:
+        conn.close()
+
+def format_ban_message(ban_until_ts: int, ban_reason: str, ban_hours: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Формирует строгое сообщение блокировки с кнопкой поддержки."""
+    if ban_until_ts > 0:
+        dt_str = datetime.datetime.fromtimestamp(ban_until_ts, tz=datetime.timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        time_text = f"• Время блокировки: <b>{ban_hours} ч.</b>\n• Заблокирован до: <b>{dt_str}</b>"
+    else:
+        time_text = "• Время блокировки: <b>Навсегда</b>"
+
+    text = (
+        "⛔️ <b>Доступ заблокирован!</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Вы получили бан в системе бота и не можете использовать команды.\n\n"
+        f"{time_text}\n"
+        f"• Причина: <b>{clean_html(ban_reason or 'Нарушение правил')}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Если вы считаете блокировку ошибочной, обратитесь в поддержку:"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]
+    ])
+    return text, kb
+
+# ---------------------------------------------------------------------------
+# ПРОЧИЕ ОПЕРАЦИИ С БАЗОЙ ДАННЫХ
+# ---------------------------------------------------------------------------
 
 def set_last_drop(user_id: int, ts: int) -> None:
     conn = db_connect()
@@ -824,7 +964,7 @@ def remove_clan_request(clan_id: int, user_id: int) -> None:
         conn.close()
 
 # ---------------------------------------------------------------------------
-# РЕНДЕР КАРТОЧЕК И БАННЕРОВ (PIL)
+# РЕНДЕР КАРТОЧЕК И БАННЕРОВ (ЧИСТЫЙ ТЕКСТ БЕЗ СМАЙЛИКОВ И КВАДРАТОВ)
 # ---------------------------------------------------------------------------
 
 def draw_rounded_rect(draw, coords, radius, fill=None, outline=None, width=1):
@@ -843,7 +983,8 @@ def make_default_avatar(size: int = 200, text: str = "Player") -> Image.Image:
     draw.ellipse([cx - body_r, bcy - body_r, cx + body_r, bcy + body_r], fill=(225, 227, 238, 255))
 
     font = load_font(22, bold=True)
-    draw.text((size // 6, size - 36), text[:8], font=font, fill=(255, 255, 255, 230))
+    clean_txt = strip_all_emojis_for_image(text)[:8]
+    draw.text((size // 6, size - 36), clean_txt, font=font, fill=(255, 255, 255, 230))
     return img
 
 def load_font(size: int, bold: bool = False):
@@ -856,6 +997,7 @@ def load_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 async def generate_main_menu_banner() -> io.BytesIO:
+    """Генерация баннера меню БЕЗ смайликов (устранены квадратики)."""
     WIDTH, HEIGHT = 1000, 320
     img = Image.new("RGBA", (WIDTH, HEIGHT), (22, 28, 38, 255))
 
@@ -870,8 +1012,8 @@ async def generate_main_menu_banner() -> io.BytesIO:
     f_title = load_font(52, bold=True)
     f_sub = load_font(23, bold=False)
 
-    draw.text((WIDTH // 2, 115), "✨ NEW NFT GIFT BOT ✨", font=f_title, fill=(255, 255, 255), anchor="mm")
-    draw.text((WIDTH // 2, 185), "Выбивай эксклюзивные Gifts, объединяйся в кланы и торгуй!", font=f_sub, fill=(234, 179, 8), anchor="mm")
+    draw.text((WIDTH // 2, 115), "NEW NFT GIFT BOT", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 185), "Telegram Gifts, кланы, кастомизация и торговля", font=f_sub, fill=(234, 179, 8), anchor="mm")
 
     bio = io.BytesIO()
     img.save(bio, "PNG")
@@ -880,7 +1022,7 @@ async def generate_main_menu_banner() -> io.BytesIO:
     return bio
 
 async def generate_market_banner() -> io.BytesIO:
-    """Генерация стильного баннера для NFT Marketplace."""
+    """Генерация стильного баннера для NFT Marketplace БЕЗ смайликов."""
     WIDTH, HEIGHT = 1000, 340
     img = Image.new("RGBA", (WIDTH, HEIGHT), (18, 24, 34, 255))
 
@@ -896,13 +1038,12 @@ async def generate_market_banner() -> io.BytesIO:
     f_title = load_font(48, bold=True)
     f_sub = load_font(21, bold=False)
 
-    # Бейдж P2P MARKET
     draw_rounded_rect(draw, [WIDTH // 2 - 110, 45, WIDTH // 2 + 110, 80], radius=10, fill=(16, 185, 129, 60), outline=(16, 185, 129, 200), width=1)
     draw.text((WIDTH // 2, 62), "P2P TRADE EXCHANGE", font=f_badge, fill=(52, 211, 153), anchor="mm")
 
-    draw.text((WIDTH // 2, 135), "🛒 NFT MARKETPLACE", font=f_title, fill=(255, 255, 255), anchor="mm")
+    draw.text((WIDTH // 2, 135), "NFT MARKETPLACE", font=f_title, fill=(255, 255, 255), anchor="mm")
     draw.text((WIDTH // 2, 205), "Торговая площадка для покупки и продажи улучшенных подарков", font=f_sub, fill=(209, 213, 219), anchor="mm")
-    draw.text((WIDTH // 2, 250), "⚠️ Создание офферов станет доступно после запуска улучшений!", font=load_font(18, bold=True), fill=(234, 179, 8), anchor="mm")
+    draw.text((WIDTH // 2, 250), "Создание офферов станет доступно после запуска улучшений", font=load_font(18, bold=True), fill=(234, 179, 8), anchor="mm")
 
     bio = io.BytesIO()
     img.save(bio, "PNG")
@@ -921,19 +1062,17 @@ async def generate_profile_card_image(
     clan_tag: Optional[str] = None,
     custom_bg_path: Optional[str] = None,
 ) -> io.BytesIO:
+    """Генерация карточки профиля БЕЗ смайликов (устранены квадратики)."""
     WIDTH, HEIGHT = 1000, 560
-    clean_name = normalize_telegram_name(user_name)
+    clean_name = strip_all_emojis_for_image(user_name)
 
     # 1. Формирование базового фона карточки
     has_custom_bg = False
     if custom_bg_path and Path(custom_bg_path).exists():
         try:
             custom_img = Image.open(custom_bg_path).convert("RGBA")
-            # Подгонка по размеру
             base_bg = ImageOps.fit(custom_img, (WIDTH, HEIGHT))
-            # Легкое размытие (по ТЗ пользователя: "чуть-чуть размыта на заднем фоне")
             base_bg = base_bg.filter(ImageFilter.GaussianBlur(10))
-            # Затемнение поверх фото ("чуть затемнена и все это будут видеть")
             darken_overlay = Image.new("RGBA", (WIDTH, HEIGHT), (12, 16, 24, 195))
             base_bg = Image.alpha_composite(base_bg, darken_overlay)
             has_custom_bg = True
@@ -970,17 +1109,15 @@ async def generate_profile_card_image(
     else:
         av_img = make_default_avatar(av_size, clean_name[:10])
 
-    # Скругленная маска аватара
     mask = Image.new("L", (av_size, av_size), 0)
     mask_draw = ImageDraw.Draw(mask)
     mask_draw.rounded_rectangle([0, 0, av_size, av_size], radius=24, fill=255)
 
     av_x, av_y = 55, 65
-    # Рамка вокруг аватара
     draw_rounded_rect(draw, [av_x - 3, av_y - 3, av_x + av_size + 3, av_y + av_size + 3], radius=26, fill=None, outline=(234, 179, 8, 180), width=2)
     base_bg.paste(av_img, (av_x, av_y), mask)
 
-    # 3. Текстовая информация профиля
+    # 3. Текстовая информация профиля (без смайликов)
     text_x = 280
     curr_x = text_x
     if clan_tag:
@@ -989,12 +1126,11 @@ async def generate_profile_card_image(
         bbox = draw.textbbox((curr_x, 70), tag_str, font=font_title)
         curr_x = bbox[2]
 
-    # Обрезаем слишком длинное имя
     disp_name = clean_name if len(clean_name) <= 16 else (clean_name[:14] + "..")
     draw.text((curr_x, 70), disp_name, font=font_title, fill=(255, 255, 255))
 
     lvl, cur_xp, req_xp, ratio = calculate_xp_level_info(user_xp)
-    draw.text((text_x, 125), f"УРОВЕНЬ {lvl}  •  {cur_xp:,} / {req_xp:,} XP", font=font_sub, fill=(229, 231, 235))
+    draw.text((text_x, 125), f"LEVEL {lvl} ({cur_xp:,} / {req_xp:,} XP)", font=font_sub, fill=(229, 231, 235))
 
     # Полоса прогресса опыта
     bar_x, bar_y, bar_w, bar_h = text_x, 160, 380, 12
@@ -1002,24 +1138,23 @@ async def generate_profile_card_image(
     fill_w = max(10, int(bar_w * ratio))
     draw_rounded_rect(draw, [bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], radius=6, fill=(234, 179, 8))
 
-    # ID плашка
     draw.text((820, 75), f"ID #{user_sys_id}", font=font_small, fill=(156, 163, 175))
     draw.line([(text_x, 195), (940, 195)], fill=(75, 85, 99, 140), width=1)
 
-    # Статистика: Баланс и Ранг
+    # Статистика: Баланс Stars и Ранг
     stats_y = 210
     draw.rectangle([text_x, stats_y, text_x + 4, stats_y + 40], fill=(234, 179, 8))
-    draw.text((text_x + 14, stats_y - 2), "БАЛАНС STARS", font=font_stat_lbl, fill=(156, 163, 175))
-    draw.text((text_x + 14, stats_y + 16), f"{stars_balance:,} ⭐", font=font_stat_val, fill=(255, 255, 255))
+    draw.text((text_x + 14, stats_y - 2), "STARS BALANCE", font=font_stat_lbl, fill=(156, 163, 175))
+    draw.text((text_x + 14, stats_y + 16), f"{stars_balance:,} STARS", font=font_stat_val, fill=(255, 255, 255))
 
     rank_x = text_x + 280
     draw.rectangle([rank_x, stats_y, rank_x + 4, stats_y + 40], fill=(59, 130, 246))
-    draw.text((rank_x + 14, stats_y - 2), "МЕСТО В ТОПЕ", font=font_stat_lbl, fill=(156, 163, 175))
+    draw.text((rank_x + 14, stats_y - 2), "GLOBAL RANK", font=font_stat_lbl, fill=(156, 163, 175))
     draw.text((rank_x + 14, stats_y + 16), f"#{rank}", font=font_stat_val, fill=(255, 255, 255))
 
     # 4. Секция Избранных подарков (FAVORITES)
     draw.line([(55, 290), (945, 290)], fill=(75, 85, 99, 140), width=1)
-    draw.text((55, 305), "ИЗБРАННЫЕ ПОДАРКИ (FAVORITES)", font=font_stat_lbl, fill=(156, 163, 175))
+    draw.text((55, 305), "FAVORITES", font=font_stat_lbl, fill=(156, 163, 175))
 
     slot_y = 335
     slot_w, slot_h = 113, 113
@@ -1028,7 +1163,6 @@ async def generate_profile_card_image(
 
     for i in range(7):
         cur_x = start_x + i * (slot_w + spacing)
-        # Полупрозрачная подложка слота
         draw_rounded_rect(draw, [cur_x, slot_y, cur_x + slot_w, slot_y + slot_h], radius=16, fill=(15, 23, 42, 210), outline=(51, 65, 85, 180), width=1)
 
         if i < len(favorite_gifts):
@@ -1044,21 +1178,20 @@ async def generate_profile_card_image(
                 except Exception as e:
                     log.warning("Ошибка рендера подарка в карточке: %s", e)
             else:
-                # Если файла изображения нет на диске, рисуем красивую текстовую иконку
-                draw.text((cur_x + slot_w // 2, slot_y + slot_h // 2 - 10), rarity_emoji(g.chance), font=load_font(28), fill=(255, 255, 255), anchor="mm")
-                draw.text((cur_x + slot_w // 2, slot_y + slot_h - 22), f"{g.stars}⭐", font=load_font(13, bold=True), fill=(234, 179, 8), anchor="mm")
+                # ЧИСТЫЙ ТЕКСТ БЕЗ СМАЙЛИКОВ (Никаких эмодзи в PIL!)
+                clean_g_name = g.name.split('(')[0].strip()[:9]
+                draw.text((cur_x + slot_w // 2, slot_y + slot_h // 2 - 8), clean_g_name, font=load_font(13, bold=True), fill=(255, 255, 255), anchor="mm")
+                draw.text((cur_x + slot_w // 2, slot_y + slot_h - 22), f"{g.stars:,} Stars", font=load_font(11, bold=True), fill=(234, 179, 8), anchor="mm")
         else:
-            # Пустой слот с деликатным крестиком
             cx, cy = cur_x + slot_w // 2, slot_y + slot_h // 2
             arm = 12
             thick = 3
             draw.line([(cx - arm, cy - arm), (cx + arm, cy + arm)], fill=(100, 116, 139, 120), width=thick)
             draw.line([(cx + arm, cy - arm), (cx - arm, cy + arm)], fill=(100, 116, 139, 120), width=thick)
 
-    # Кастомная плашка "CUSTOM BACKGROUND" если у пользователя установлен кастомный фон
     if has_custom_bg:
         draw_rounded_rect(draw, [55, HEIGHT - 52, 230, HEIGHT - 24], radius=6, fill=(0, 0, 0, 120))
-        draw.text((142, HEIGHT - 38), "🎨 Кастомный фон", font=load_font(13, bold=True), fill=(229, 231, 235), anchor="mm")
+        draw.text((142, HEIGHT - 38), "CUSTOM BACKGROUND", font=load_font(13, bold=True), fill=(229, 231, 235), anchor="mm")
 
     bio = io.BytesIO()
     base_bg.save(bio, "PNG")
@@ -1067,11 +1200,11 @@ async def generate_profile_card_image(
     return bio
 
 # ---------------------------------------------------------------------------
-# КЛАВИАТУРЫ (ЭРГОНОМИКА И СТИЛЬ КНОПОК)
+# КЛАВИАТУРЫ (ЭРГОНОМИКА И СТИЛЬ)
 # ---------------------------------------------------------------------------
 
 def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
-    """Главное меню бота с удобным расположением по 2 кнопки в ряд."""
+    """Главное меню бота (2 кнопки в ряд, удобное управление)."""
     buttons = [
         [
             InlineKeyboardButton("👤 Профиль", callback_data="nav_profile"),
@@ -1099,7 +1232,6 @@ def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 def quick_nav_keyboard() -> InlineKeyboardMarkup:
-    """Удобная строка быстрых переходов."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("👤 Профиль", callback_data="nav_profile"),
@@ -1121,33 +1253,32 @@ def back_to_main_keyboard() -> InlineKeyboardMarkup:
 
 CASE_TIERS = {
     "tier1": {
-        "name": "📦 Обычный кейс",
+        "name": "📦 Кейс 1",
         "price": 100,
         "pool": [g for g in GIFTS if g.stars <= 8000]
     },
     "tier2": {
-        "name": "🔷 Редкий кейс",
+        "name": "🔷 Кейс 2",
         "price": 500,
         "pool": [g for g in GIFTS if 200 <= g.stars <= 20000]
     },
     "tier3": {
-        "name": "🟣 Эпический кейс",
+        "name": "🟣 Кейс 3",
         "price": 2500,
         "pool": [g for g in GIFTS if g.stars >= 500]
     },
     "tier4": {
-        "name": "👑 Легендарный кейс",
+        "name": "👑 Кейс 4",
         "price": 10000,
         "pool": GIFTS
     }
 }
 
 # ---------------------------------------------------------------------------
-# ПРОФИЛЬ (С ПОДДЕРЖКОЙ КАСТОМНОГО ФОНА И ОТКАЗОУСТОЙЧИВОСТИ)
+# ПРОФИЛЬ (КАСТОМНЫЙ ФОН + ЗАЩИТА ОТ ПАДЕНИЙ)
 # ---------------------------------------------------------------------------
 
 async def show_profile_handler(update_or_query, target_user_id: int, context: ContextTypes.DEFAULT_TYPE, back_to_top_page: Optional[int] = None) -> None:
-    """Отображение профиля игрока (собственного или любого игрока из ТОПа)."""
     current_viewer_id = (
         update_or_query.effective_user.id
         if hasattr(update_or_query, "effective_user") and update_or_query.effective_user
@@ -1157,7 +1288,6 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
     db_user = get_or_create_user(target_user_id, "", "")
     clean_name = normalize_telegram_name(db_user["first_name"] or db_user["username"] or "Игрок")
 
-    # Скачивание аватара с обработкой ошибок
     avatar_bytes = None
     try:
         photos = await context.bot.get_user_profile_photos(target_user_id, limit=1)
@@ -1178,7 +1308,6 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
     clan = get_user_clan(target_user_id)
     clan_tag = clan["tag"] if clan else None
 
-    # Генерация карточки профиля (с кастомным фоном, если он есть)
     card_img_io = None
     try:
         card_img_io = await generate_profile_card_image(
@@ -1213,7 +1342,6 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
         f"━━━━━━━━━━━━━━━━━━"
     )
 
-    # Кнопки под профилем
     buttons = []
     if is_self:
         buttons.append([
@@ -1236,16 +1364,9 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
 
     kb = InlineKeyboardMarkup(buttons)
 
-    # Отправка фото или текста с отказоустойчивым fallback
-    msg_target = update_or_query.message if hasattr(update_or_query, "message") and update_or_query.message else update_or_query
-
-    # Если уже открыто фото-сообщение и мы можем удалить старое
-    if hasattr(update_or_query, "callback_query") or hasattr(update_or_query, "message"):
-        try:
-            if hasattr(update_or_query, "message") and update_or_query.message and update_or_query.message.photo:
-                await update_or_query.message.delete()
-        except Exception:
-            pass
+    if hasattr(update_or_query, "message") and update_or_query.message and update_or_query.message.photo:
+        try: await update_or_query.message.delete()
+        except: pass
 
     if card_img_io:
         try:
@@ -1260,7 +1381,6 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
         except Exception as e:
             log.warning("Не удалось отправить фото профиля: %s. Отправка текста.", e)
 
-    # Fallback на текстовое сообщение
     await context.bot.send_message(
         chat_id=current_viewer_id,
         text=caption,
@@ -1279,9 +1399,8 @@ async def bg_change_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🖼 <b>Установка кастомного фона профиля</b>\n\n"
         "Отправьте любое изображение в этот чат (как фото).\n"
-        "Оно будет <b>слегка затемнено и размыто</b> на заднем плане вашей карточки профиля, "
-        "чтобы текст оставался идеально читаемым. Новый фон увидят абсолютно все игроки, "
-        "которые откроют ваш профиль (включая просмотр из ТОП-100)!\n\n"
+        "Оно будет <b>слегка затемнено и размыто</b> на заднем плане вашей карточки, "
+        "чтобы текст оставался абсолютно читаемым без искажений. Новый фон увидят все игроки!\n\n"
         "<i>Для отмены отправьте /cancel или нажмите кнопку ниже.</i>"
     )
     kb = InlineKeyboardMarkup([
@@ -1310,8 +1429,8 @@ async def bg_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user_background(user.id, str(bg_file_path))
 
         await update.message.reply_text(
-            "🎉 <b>Фон профиля успешно установлен и сохранен!</b>\n"
-            "Теперь ваша карточка выглядит уникально и эффектно для всех игроков.",
+            "🎉 <b>Фон профиля успешно сохранен и применен!</b>\n"
+            "Ваша карточка обновлена.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("👤 Посмотреть профиль", callback_data="nav_profile")],
@@ -1320,7 +1439,7 @@ async def bg_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         log.error("Ошибка загрузки фона: %s", e)
-        await update.message.reply_text("❌ Произошла ошибка при сохранении изображения. Попробуйте еще раз позже.")
+        await update.message.reply_text("❌ Ошибка при сохранении изображения. Попробуйте еще раз позже.")
 
     return ConversationHandler.END
 
@@ -1389,15 +1508,15 @@ async def show_group_guide(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🤖 <b>Подключение бота к вашей группе</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Чтобы ваши участники могли выбивать подарки прямо в чате:\n\n"
+        "Чтобы участники могли выбивать подарки прямо в чате:\n\n"
         "1️⃣ Нажмите кнопку <b>«➕ Добавить в группу»</b> ниже.\n"
-        "2️⃣ Выберите нужный групповой суперчат.\n"
+        "2️⃣ Выберите нужный суперчат.\n"
         "3️⃣ <b>Необходимые разрешения для бота:</b>\n"
-        "   • <b>Чтение сообщений (Read Messages)</b> — чтобы бот распознавал слово <code>NFT</code>\n"
-        "   • <b>Отправка сообщений (Send Messages)</b> — для отправки результатов\n"
-        "   • <b>Прикрепление фото/медиа (Send Photos)</b> — для карточек подарков и профилей\n"
-        "   • <b>Прикрепление inline-кнопок</b> — для интерактивных действий «Сохранить» / «Продать»\n"
-        "   ⭐️ <i>Рекомендуется выдать права администратора без лишних полномочий для стабильной доставки ответов.</i>\n\n"
+        "   • <b>Чтение сообщений (Read Messages)</b> — распознавать слово <code>NFT</code>\n"
+        "   • <b>Отправка сообщений (Send Messages)</b> — отправлять результаты\n"
+        "   • <b>Прикрепление фото/медиа (Send Photos)</b> — карточки подарков и профилей\n"
+        "   • <b>Инлайн-кнопки</b> — действия «Сохранить» / «Продать»\n"
+        "   ⭐️ <i>Рекомендуется дать права администратора для быстрой доставки ответов.</i>\n\n"
         "4️⃣ После добавления любой участник пишет слово <code>NFT</code> раз в час и получает подарки!"
     )
 
@@ -1417,10 +1536,10 @@ async def show_privacy_policy(query) -> None:
         "а также игровые показатели (коллекцию подарков, баланс Stars, опыт, клановое членство).\n\n"
         "2. <b>Конфиденциальность:</b>\n"
         "В разделе «⚙️ Настройки» вы в любой момент можете активировать:\n"
-        "• <b>Скрытие из ТОП-100</b> — ваш аккаунт не отображается в общих списках лидеров.\n"
+        "• <b>Скрытие из ТОП-100</b> — аккаунт не отображается в общих списках лидеров.\n"
         "• <b>Скрытие коллекции</b> — другие игроки не смогут просматривать ваши предметы.\n\n"
         "3. <b>Безопасность:</b>\n"
-        "Данные никогда не передаются сторонним сервисам или рекламодателям. База защищена протоколами WAL."
+        "Данные никогда не передаются сторонним сервисам."
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Назад в Инфо", callback_data="nav_info")],
@@ -1433,13 +1552,8 @@ async def show_rules_page(query) -> None:
         "📖 <b>Правила игры и механики</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "• <b>Команда в группах:</b> Напишите слово <code>NFT</code> (раз в 1 час). Шанс дропа — <b>90%</b>.\n"
-        "• <b>Редкости подарков:</b>\n"
-        "  🟡 <b>Легендарные</b> — от 8,000 до 350,000 ⭐ (Шанс <0.05%)\n"
-        "  🟣 <b>Эпические</b> — от 920 до 4,500 ⭐ (Шанс 0.05% - 0.3%)\n"
-        "  🔵 <b>Редкие</b> — от 350 до 830 ⭐ (Шанс 0.3% - 1.5%)\n"
-        "  🟢 <b>Необычные</b> — от 250 до 340 ⭐ (Шанс 1.5% - 5.0%)\n"
-        "  ⚪️ <b>Обычные</b> — Мишки по 50 ⭐ (Шанс 10%)\n"
-        "• <b>Кланы:</b> Доступны с 10 уровня за 100,000 ⭐. Дают префикс перед именем и клановый чат."
+        "• <b>Подарки:</b> В игре представлены оригинальные модели подарков Telegram различной стоимости.\n"
+        "• <b>Кланы:</b> Доступны с 10 уровня за 100,000 ⭐. Предоставляют клановый тег перед никнеймом и клановый состав."
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Назад в Инфо", callback_data="nav_info")],
@@ -1448,38 +1562,31 @@ async def show_rules_page(query) -> None:
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
-# РАЗДЕЛ "NFT МАРКЕТ" (P2P БИРЖА С БАННЕРОМ И ФИЛЬТРАМИ)
+# РАЗДЕЛ "NFT МАРКЕТ" (ФИЛЬТРЫ: ПО ЦЕНЕ И ПО МОДЕЛЯМ)
 # ---------------------------------------------------------------------------
 
 async def show_market_hub(update_or_query) -> None:
-    """Главная витрина маркета с баннером и фильтрами."""
     banner_io = await generate_market_banner()
 
     caption = (
         "🛒 <b>NFT Marketplace (Торговая площадка)</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Официальная P2P биржа редких цифровых подарков между игроками.\n\n"
+        "Официальная P2P биржа подарков Telegram между игроками.\n\n"
         "⚠️ <b>Важное системное уведомление:</b>\n"
         "На маркете можно будет выставлять и покупать <b>только улучшенные подарки</b>!\n"
         "Система улучшения подарков сейчас находится в разработке, поэтому создание офферов "
         "и торговые сделки временно на паузе.\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Вы можете ознакомиться со структурой разделов и фильтрами витрины:"
+        "Используйте фильтры витрины по стоимости и по моделям:"
     )
 
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Создать оффер", callback_data="market_create_offer")],
         [
-            InlineKeyboardButton("➕ Создать оффер", callback_data="market_create_offer"),
-            InlineKeyboardButton("📋 Все офферы", callback_data="market_list:all:1"),
+            InlineKeyboardButton("💰 Фильтр: По стоимости", callback_data="market_filter_price_menu"),
+            InlineKeyboardButton("🧸 Фильтр: По моделям", callback_data="market_filter_model_menu"),
         ],
-        [
-            InlineKeyboardButton("🟡 Легендарные", callback_data="market_list:legendary:1"),
-            InlineKeyboardButton("🟣 Эпические", callback_data="market_list:epic:1"),
-        ],
-        [
-            InlineKeyboardButton("🔵 Редкие", callback_data="market_list:rare:1"),
-            InlineKeyboardButton("🟢 Необычные", callback_data="market_list:uncommon:1"),
-        ],
+        [InlineKeyboardButton("📋 Все офферы (Каталог)", callback_data="market_view:all:all:1")],
         [
             InlineKeyboardButton("🔍 Мои офферы", callback_data="market_my_offers"),
             InlineKeyboardButton("📊 История сделок", callback_data="market_history"),
@@ -1492,7 +1599,8 @@ async def show_market_hub(update_or_query) -> None:
 
     if hasattr(update_or_query, "message") and update_or_query.message:
         if update_or_query.message.photo:
-            await update_or_query.message.delete()
+            try: await update_or_query.message.delete()
+            except: pass
         await update_or_query.message.reply_photo(
             photo=InputFile(banner_io, filename="market.png"),
             caption=caption,
@@ -1501,7 +1609,8 @@ async def show_market_hub(update_or_query) -> None:
         )
     else:
         if hasattr(update_or_query, "photo") and update_or_query.photo:
-            await update_or_query.delete()
+            try: await update_or_query.delete()
+            except: pass
         await update_or_query.reply_photo(
             photo=InputFile(banner_io, filename="market.png"),
             caption=caption,
@@ -1509,31 +1618,62 @@ async def show_market_hub(update_or_query) -> None:
             reply_markup=kb
         )
 
-async def show_market_category_list(query, category: str, page: int = 1):
-    category_titles = {
-        "all": "Все категории",
-        "legendary": "🟡 Легендарные подарки",
-        "epic": "🟣 Эпические подарки",
-        "rare": "🔵 Редкие подарки",
-        "uncommon": "🟢 Необычные подарки",
-        "common": "⚪️ Обычные подарки",
-    }
-    cat_title = category_titles.get(category, "Каталог")
+async def show_market_filter_price_menu(query):
+    text = (
+        "💰 <b>Фильтр маркета по стоимости:</b>\n"
+        "Выберите интересующий ценовой диапазон:"
+    )
+    buttons = []
+    for pkey, (ptitle, _, _) in PRICE_TIERS.items():
+        buttons.append([InlineKeyboardButton(ptitle, callback_data=f"market_view:price:{pkey}:1")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
+    kb = InlineKeyboardMarkup(buttons)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_filter_model_menu(query):
+    text = (
+        "🧸 <b>Фильтр маркета по моделям подарков:</b>\n"
+        "Выберите модель Telegram Gifts:"
+    )
+    buttons = []
+    for mkey, mtitle in MODEL_GROUPS.items():
+        buttons.append([InlineKeyboardButton(mtitle, callback_data=f"market_view:model:{mkey}:1")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
+    kb = InlineKeyboardMarkup(buttons)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_view_page(query, ftype: str, fkey: str, page: int = 1):
+    items = get_gifts_filtered(ftype, fkey)
+    if ftype == "price":
+        filter_name = PRICE_TIERS.get(fkey, ("По цене", 0, 0))[0]
+    elif ftype == "model":
+        filter_name = MODEL_GROUPS.get(fkey, "По модели")
+    else:
+        filter_name = "Все модели"
 
     text = (
-        f"📋 <b>Маркет: {cat_title} (Стр. {page}/1)</b>\n"
+        f"📋 <b>Маркет: {filter_name}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
+        f"Всего моделей в категории: <b>{len(items)}</b>\n\n"
         f"<i>В данный момент активных лотов от игроков не найдено.</i>\n\n"
-        f"⚠️ Напоминаем: торговля откроется сразу после запуска модуля улучшения подарков. "
-        f"Продавать можно будет только улучшенные NFT!"
+        f"⚠️ Напоминаем: продавать можно будет только улучшенные подарки. Торговля откроется сразу после запуска модуля улучшения!"
     )
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Создать оффер", callback_data="market_create_offer")],
         [
-            InlineKeyboardButton("🟡 Легенд.", callback_data="market_list:legendary:1"),
-            InlineKeyboardButton("🟣 Эпич.", callback_data="market_list:epic:1"),
-            InlineKeyboardButton("🔵 Редкие", callback_data="market_list:rare:1"),
+            InlineKeyboardButton("💰 По стоимости", callback_data="market_filter_price_menu"),
+            InlineKeyboardButton("🧸 По моделям", callback_data="market_filter_model_menu"),
         ],
         [InlineKeyboardButton("⬅️ В витрину маркета", callback_data="nav_market")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
@@ -1546,13 +1686,14 @@ async def show_market_category_list(query, category: str, page: int = 1):
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
-# АДМИН-ПАНЕЛЬ: ВЫДАЧА NFT ПО КНОПКАМ И УВЕДОМЛЕНИЯ
+# АДМИН-ПАНЕЛЬ: ВЫДАЧА NFT ПО ФИЛЬТРАМ + СИСТЕМА БАНОВ
 # ---------------------------------------------------------------------------
 
 async def show_admin_panel(query) -> None:
     conn = db_connect()
     try:
         total_users = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+        total_banned = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned=1").fetchone()["cnt"]
         total_collection_gifts = conn.execute("SELECT COUNT(*) as cnt FROM collection").fetchone()["cnt"]
         total_sold = conn.execute("SELECT SUM(total_sold) as s FROM users").fetchone()["s"] or 0
         total_drops = conn.execute("SELECT SUM(total_drops) as s FROM users").fetchone()["s"] or 0
@@ -1565,18 +1706,23 @@ async def show_admin_panel(query) -> None:
         "👑 <b>Панель управления администратора</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"👥 Зарегистрировано игроков: <b>{total_users:,}</b>\n"
+        f"⛔️ Заблокировано игроков: <b>{total_banned:,}</b>\n"
         f"🛡 Создано кланов: <b>{total_clans:,}</b>\n"
         f"💰 Совокупный баланс игроков: <b>{total_stars_capital:,} ⭐</b>\n"
-        f"🎁 Подарков на руках в коллекциях: <b>{total_collection_gifts:,}</b>\n"
+        f"🎁 Подарков в коллекциях: <b>{total_collection_gifts:,}</b>\n"
         f"🎰 Всего выбито подарков: <b>{total_drops:,}</b>\n"
         f"🛍 Продано предметов: <b>{total_sold:,}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Выберите действие для управления сервером:"
+        "Выберите действие:"
     )
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Выдать Звёзды игроку", callback_data="admin_give_stars_start")],
-        [InlineKeyboardButton("🎁 Выдать NFT-подарок (по кнопкам)", callback_data="admin_give_nft_start")],
+        [InlineKeyboardButton("🎁 Выдать NFT-подарок (фильтры)", callback_data="admin_give_nft_start")],
+        [
+            InlineKeyboardButton("🔨 Забанить игрока", callback_data="admin_ban_start"),
+            InlineKeyboardButton("🔓 Разбанить игрока", callback_data="admin_unban_start"),
+        ],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
     ])
 
@@ -1585,6 +1731,140 @@ async def show_admin_panel(query) -> None:
         await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+# --- БАН ИГРОКА (FSM) ---
+
+async def admin_ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+
+    text = "🔨 <b>Блокировка игрока</b>\n\nВведите Telegram ID или @username нарушителя:"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_cancel")]])
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WAIT_ADMIN_BAN_USER
+
+async def admin_ban_user_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_str = update.message.text.strip()
+    target = get_user_by_target(target_str)
+    if not target:
+        await update.message.reply_text("❌ Пользователь не найден в базе данных. Попробуйте снова:")
+        return WAIT_ADMIN_BAN_USER
+
+    if target["user_id"] in ADMIN_IDS:
+        await update.message.reply_text("❌ Нельзя заблокировать администратора!")
+        return ConversationHandler.END
+
+    context.user_data["ban_target_id"] = target["user_id"]
+    tname = normalize_telegram_name(target["first_name"] or target["username"] or "Игрок")
+    await update.message.reply_text(
+        f"✅ Игрок найден: <b>{clean_html(tname)}</b> (ID: <code>{target['user_id']}</code>).\n\n"
+        f"Введите срок блокировки в часах (например, <code>24</code>, <code>72</code>, <code>720</code>):",
+        parse_mode=ParseMode.HTML
+    )
+    return WAIT_ADMIN_BAN_HOURS
+
+async def admin_ban_hours_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    hours_str = update.message.text.strip()
+    if not hours_str.isdigit() or int(hours_str) <= 0:
+        await update.message.reply_text("❌ Введите корректное положительное число часов:")
+        return WAIT_ADMIN_BAN_HOURS
+
+    context.user_data["ban_hours"] = int(hours_str)
+    await update.message.reply_text("📝 Введите причину блокировки (кратко):")
+    return WAIT_ADMIN_BAN_REASON
+
+async def admin_ban_reason_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reason = update.message.text.strip()
+    target_id = context.user_data.get("ban_target_id")
+    hours = context.user_data.get("ban_hours", 24)
+
+    ban_user(target_id, hours, reason)
+
+    # Отправка уведомления нарушителю
+    try:
+        until_ts = int(time.time()) + (hours * 3600)
+        ban_text, ban_kb = format_ban_message(until_ts, reason, hours)
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=ban_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=ban_kb
+        )
+    except Exception as e:
+        log.warning("Не удалось уведомить забаненного игрока %s: %s", target_id, e)
+
+    await update.message.reply_text(
+        f"⛔️ <b>Игрок (ID: <code>{target_id}</code>) успешно заблокирован!</b>\n"
+        f"• Срок: <b>{hours} ч.</b>\n"
+        f"• Причина: <b>{clean_html(reason)}</b>\n\n"
+        f"При вводе любой команды нарушителю будет выводиться экран блокировки.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")]
+        ])
+    )
+    return ConversationHandler.END
+
+# --- РАЗБАН ИГРОКА (FSM) ---
+
+async def admin_unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+
+    text = "🔓 <b>Разблокировка игрока</b>\n\nВведите Telegram ID или @username игрока:"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_cancel")]])
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WAIT_ADMIN_UNBAN_USER
+
+async def admin_unban_user_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_str = update.message.text.strip()
+    target = get_user_by_target(target_str)
+    if not target:
+        await update.message.reply_text("❌ Пользователь не найден. Попробуйте снова:")
+        return WAIT_ADMIN_UNBAN_USER
+
+    target_id = target["user_id"]
+    unban_user(target_id)
+
+    # Уведомление пользователю о разбане
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text="🎉 <b>Ваш аккаунт был разблокирован администрацией!</b>\nВы снова можете полноценно пользоваться ботом.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=quick_nav_keyboard()
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>Игрок (ID: <code>{target_id}</code>) успешно разблокирован!</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")]
+        ])
+    )
+    return ConversationHandler.END
+
+# --- ВЫДАЧА STARS ---
 
 async def admin_give_stars_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1607,7 +1887,7 @@ async def admin_give_stars_user(update: Update, context: ContextTypes.DEFAULT_TY
     target_str = update.message.text.strip()
     target = get_user_by_target(target_str)
     if not target:
-        await update.message.reply_text("❌ Пользователь не найден в базе данных. Попробуйте еще раз:")
+        await update.message.reply_text("❌ Пользователь не найден. Попробуйте снова:")
         return WAIT_ADMIN_GIVE_STARS_USER
 
     context.user_data["admin_target_user_id"] = target["user_id"]
@@ -1629,7 +1909,6 @@ async def admin_give_stars_amount(update: Update, context: ContextTypes.DEFAULT_
     target_id = context.user_data.get("admin_target_user_id")
     add_user_stars(target_id, amount)
 
-    # Отправка уведомления пользователю
     try:
         await context.bot.send_message(
             chat_id=target_id,
@@ -1647,7 +1926,7 @@ async def admin_give_stars_amount(update: Update, context: ContextTypes.DEFAULT_
 
     await update.message.reply_text(
         f"✅ Успешно начислено <b>{amount:,} ⭐</b> пользователю (ID: <code>{target_id}</code>)!\n"
-        f"Игроку отправлено уведомление.",
+        f"Игроку отправлено личное уведомление.",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
@@ -1655,6 +1934,8 @@ async def admin_give_stars_amount(update: Update, context: ContextTypes.DEFAULT_
         ])
     )
     return ConversationHandler.END
+
+# --- ВЫДАЧА NFT ПО ФИЛЬТРАМ (СТОИМОСТЬ И МОДЕЛИ) ---
 
 async def admin_give_nft_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1684,21 +1965,18 @@ async def admin_give_nft_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["admin_nft_target_user_id"] = target_id
     target_name = normalize_telegram_name(target["first_name"] or target["username"] or "Игрок")
 
-    # Показываем интерактивный каталог подарков по кнопкам
-    await show_admin_nft_category_selector(update.message, target_id, target_name)
+    await show_admin_nft_filter_selector(update.message, target_id, target_name)
     return ConversationHandler.END
 
-async def show_admin_nft_category_selector(msg_or_query, target_id: int, target_name: str):
+async def show_admin_nft_filter_selector(msg_or_query, target_id: int, target_name: str):
     text = (
-        f"🎁 <b>Выбор подарка для игрока {clean_html(target_name)} (ID: {target_id})</b>\n\n"
-        f"Выберите категорию редкости подарка для выдачи по кнопкам:"
+        f"🎁 <b>Выдача подарка для игрока {clean_html(target_name)} (ID: {target_id})</b>\n\n"
+        f"Выберите способ фильтрации подарков для выдачи по кнопкам:"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟡 Легендарные подарки", callback_data=f"adm_cat:legendary:{target_id}:1")],
-        [InlineKeyboardButton("🟣 Эпические подарки", callback_data=f"adm_cat:epic:{target_id}:1")],
-        [InlineKeyboardButton("🔵 Редкие подарки", callback_data=f"adm_cat:rare:{target_id}:1")],
-        [InlineKeyboardButton("🟢 Необычные подарки", callback_data=f"adm_cat:uncommon:{target_id}:1")],
-        [InlineKeyboardButton("⚪️ Обычные мишки (50⭐)", callback_data=f"adm_cat:common:{target_id}:1")],
+        [InlineKeyboardButton("💰 Фильтр: По стоимости", callback_data=f"adm_filt_price:{target_id}")],
+        [InlineKeyboardButton("🧸 Фильтр: По моделям", callback_data=f"adm_filt_model:{target_id}")],
+        [InlineKeyboardButton("📋 Все модели подарков", callback_data=f"adm_items:all:all:{target_id}:1")],
         [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")]
     ])
     if hasattr(msg_or_query, "reply_text"):
@@ -1706,8 +1984,26 @@ async def show_admin_nft_category_selector(msg_or_query, target_id: int, target_
     else:
         await msg_or_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-async def show_admin_nft_items_page(query, category: str, target_id: int, page: int = 1):
-    gifts_pool = get_gifts_by_rarity_group(category)
+async def show_admin_nft_price_tiers(query, target_id: int):
+    text = f"💰 <b>Выбор по стоимости (ID получателя: {target_id}):</b>"
+    buttons = []
+    for pkey, (ptitle, _, _) in PRICE_TIERS.items():
+        buttons.append([InlineKeyboardButton(ptitle, callback_data=f"adm_items:price:{pkey}:{target_id}:1")])
+    buttons.append([InlineKeyboardButton("⬅️ К выбору фильтра", callback_data=f"adm_back_filters:{target_id}")])
+    kb = InlineKeyboardMarkup(buttons)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_admin_nft_model_groups(query, target_id: int):
+    text = f"🧸 <b>Выбор по моделям Telegram (ID получателя: {target_id}):</b>"
+    buttons = []
+    for mkey, mtitle in MODEL_GROUPS.items():
+        buttons.append([InlineKeyboardButton(mtitle, callback_data=f"adm_items:model:{mkey}:{target_id}:1")])
+    buttons.append([InlineKeyboardButton("⬅️ К выбору фильтра", callback_data=f"adm_back_filters:{target_id}")])
+    kb = InlineKeyboardMarkup(buttons)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_admin_nft_items_page(query, ftype: str, fkey: str, target_id: int, page: int = 1):
+    gifts_pool = get_gifts_filtered(ftype, fkey)
     page_size = 6
     total_pages = max(1, math.ceil(len(gifts_pool) / page_size))
     page = max(1, min(page, total_pages))
@@ -1716,26 +2012,26 @@ async def show_admin_nft_items_page(query, category: str, target_id: int, page: 
     items = gifts_pool[start_idx : start_idx + page_size]
 
     text = (
-        f"🎁 <b>Каталог подарков ({rarity_emoji(gifts_pool[0].chance if gifts_pool else 1.0)} {category.upper()})</b>\n"
+        f"🎁 <b>Выберите подарок для выдачи (Стр. {page}/{total_pages})</b>\n"
         f"Получатель ID: <code>{target_id}</code>\n"
-        f"Нажмите на нужный подарок для мгновенной выдачи игроку:"
+        f"Нажмите на нужную кнопку для выдачи игроку:"
     )
 
     buttons = []
     for g in items:
-        btn_text = f"{rarity_emoji(g.chance)} {g.name[:25]} ({g.stars:,}⭐)"
+        btn_text = f"🎁 {g.name[:25]} ({g.stars:,}⭐)"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"adm_give_do:{g.key}:{target_id}")])
 
     nav_row = []
     if page > 1:
-        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"adm_cat:{category}:{target_id}:{page-1}"))
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"adm_items:{ftype}:{fkey}:{target_id}:{page-1}"))
     nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
     if page < total_pages:
-        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"adm_cat:{category}:{target_id}:{page+1}"))
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"adm_items:{ftype}:{fkey}:{target_id}:{page+1}"))
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton("📂 К категориям редкостей", callback_data=f"adm_back_cats:{target_id}")])
+    buttons.append([InlineKeyboardButton("📂 Сменить фильтр", callback_data=f"adm_back_filters:{target_id}")])
     buttons.append([InlineKeyboardButton("👑 Админ-Панель", callback_data="admin_panel")])
 
     kb = InlineKeyboardMarkup(buttons)
@@ -1749,16 +2045,15 @@ async def execute_admin_give_nft(query, gift_key: str, target_id: int, context: 
 
     add_to_collection(target_id, gift_key)
 
-    # Отправляем уведомление игроку о получении подарка
     try:
         await context.bot.send_message(
             chat_id=target_id,
             text=(
-                f"🎁 <b>Вам выдан эксклюзивный NFT-подарок от Администрации!</b>\n"
+                f"🎁 <b>Вам выдан NFT-подарок от Администрации!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"{rarity_emoji(gift.chance)} <b>{gift.name}</b>\n"
+                f"<b>{gift.name}</b>\n"
+                f"• Модель: <b>{gift.model_name}</b>\n"
                 f"• Ценность: <b>{fmt_stars_rub(gift.stars)}</b>\n"
-                f"• Редкость: <b>{rarity_label(gift.chance)}</b>\n"
                 f"• Опыт: <b>+{gift.xp} XP</b>\n\n"
                 f"Предмет уже добавлен в вашу коллекцию!"
             ),
@@ -1771,12 +2066,13 @@ async def execute_admin_give_nft(query, gift_key: str, target_id: int, context: 
     await query.answer(f"✅ Выдан: {gift.name}!", show_alert=True)
     text = (
         f"✅ <b>Подарок успешно выдан!</b>\n\n"
-        f"Предмет: {rarity_emoji(gift.chance)} <b>{gift.name}</b>\n"
+        f"Предмет: <b>{gift.name}</b>\n"
+        f"Модель: <b>{gift.model_name}</b>\n"
         f"Получатель: <code>{target_id}</code>\n"
         f"Игроку отправлено личное уведомление."
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Выдать еще один подарок", callback_data=f"adm_back_cats:{target_id}")],
+        [InlineKeyboardButton("🎁 Выдать еще один подарок", callback_data=f"adm_back_filters:{target_id}")],
         [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
         [InlineKeyboardButton("🏠 В главное меню", callback_data="nav_main")]
     ])
@@ -1846,7 +2142,8 @@ async def show_clans_hub(query_or_update, user_id: int) -> None:
 
     if hasattr(query_or_update, "message") and query_or_update.message:
         if query_or_update.message.photo:
-            await query_or_update.message.delete()
+            try: await query_or_update.message.delete()
+            except: pass
             await query_or_update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         else:
             await query_or_update.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -2120,7 +2417,7 @@ async def show_collection_page(query, user_id: int, page: int = 1) -> None:
         g = GIFTS_BY_KEY.get(item["gift_key"])
         if not g: continue
         fav_star = "⭐ " if item["is_favorite"] else ""
-        btn_text = f"{fav_star}{rarity_emoji(g.chance)} {g.name} ({g.stars:,}⭐)"
+        btn_text = f"{fav_star}{g.name} ({g.stars:,}⭐)"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"view_item:{item['id']}:{page}")])
 
     nav_row = []
@@ -2198,18 +2495,24 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if msg is None or msg.text is None:
         return
 
+    user = update.effective_user
+    # Проверка на бан
+    is_banned, until_ts, reason, hours = is_user_banned(user.id)
+    if is_banned:
+        # Забаненный пользователь не может получать дропы в группах
+        return
+
     text_raw = msg.text.strip()
     text_lower = text_raw.lower()
 
     if text_lower in ("кто я", "я", "профиль", "profile"):
-        await show_profile_handler(update, update.effective_user.id, context)
+        await show_profile_handler(update, user.id, context)
         return
 
     allowed_words = {"nft", "нфт", "подарок"}
     if text_lower not in allowed_words:
         return
 
-    user = update.effective_user
     row = get_or_create_user(user.id, user.username or "", user.first_name or "")
 
     now = int(time.time())
@@ -2236,9 +2539,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ])
 
     caption = (
-        f"🎉 <b>{clean_html(user.first_name)}</b>, вам выпал эксклюзивный NFT-подарок!\n\n"
-        f"{rarity_emoji(gift.chance)} <b>{gift.name}</b>\n"
-        f"• Редкость: <b>{rarity_label(gift.chance)}</b>\n"
+        f"🎉 <b>{clean_html(user.first_name)}</b>, вам выпал подарок!\n\n"
+        f"<b>{gift.name}</b>\n"
+        f"• Модель: <b>{gift.model_name}</b>\n"
         f"• Опыт: <b>+{gift.xp} XP</b>\n"
         f"• Ценность: {fmt_stars_rub(gift.stars)} / {fmt_ton(gift.ton)}\n\n"
         f"Выберите действие ниже:"
@@ -2269,6 +2572,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "noop":
         return
 
+    # Проверка блокировки пользователя
+    is_banned, until_ts, reason, hours = is_user_banned(user.id)
+    if is_banned and user.id not in ADMIN_IDS:
+        ban_text, ban_kb = format_ban_message(until_ts, reason, hours)
+        await query.answer("⛔️ Ваш аккаунт заблокирован!", show_alert=True)
+        if query.message:
+            await query.message.reply_text(ban_text, parse_mode=ParseMode.HTML, reply_markup=ban_kb)
+        return
+
     # Защита приватных разделов в группах
     if query.message.chat.type != "private" and data in (
         "nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "nav_clans_hub", "admin_panel", "nav_market"
@@ -2283,16 +2595,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await show_admin_panel(query)
         return
 
-    if data.startswith("adm_cat:"):
-        _, cat, target_id, page = data.split(":")
-        await show_admin_nft_items_page(query, cat, int(target_id), int(page))
+    # Админ-выдача подарков по фильтрам цены и моделей
+    if data.startswith("adm_filt_price:"):
+        target_id = int(data.split(":")[1])
+        await show_admin_nft_price_tiers(query, target_id)
         return
 
-    if data.startswith("adm_back_cats:"):
+    if data.startswith("adm_filt_model:"):
+        target_id = int(data.split(":")[1])
+        await show_admin_nft_model_groups(query, target_id)
+        return
+
+    if data.startswith("adm_back_filters:"):
         target_id = int(data.split(":")[1])
         target = get_user_by_target(str(target_id))
         tname = normalize_telegram_name(target["first_name"] if target else "Игрок")
-        await show_admin_nft_category_selector(query, target_id, tname)
+        await show_admin_nft_filter_selector(query, target_id, tname)
+        return
+
+    if data.startswith("adm_items:"):
+        _, ftype, fkey, target_id, page = data.split(":")
+        await show_admin_nft_items_page(query, ftype, fkey, int(target_id), int(page))
         return
 
     if data.startswith("adm_give_do:"):
@@ -2300,10 +2623,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await execute_admin_give_nft(query, gift_key, int(target_id), context)
         return
 
+    # Маркет фильтры
+    if data == "market_filter_price_menu":
+        await show_market_filter_price_menu(query)
+        return
+
+    if data == "market_filter_model_menu":
+        await show_market_filter_model_menu(query)
+        return
+
+    if data.startswith("market_view:"):
+        _, ftype, fkey, page = data.split(":")
+        await show_market_view_page(query, ftype, fkey, int(page))
+        return
+
+    if data == "market_create_offer":
+        await query.answer("⚠️ Создание офферов станет доступно после запуска улучшений!", show_alert=True)
+        return
+
+    if data == "market_my_offers":
+        await query.answer("ℹ️ У вас пока нет активных офферов на маркете.", show_alert=True)
+        return
+
+    if data == "market_history":
+        await query.answer("📊 История сделок пока пуста.", show_alert=True)
+        return
+
     if data == "nav_main":
         banner_img = await generate_main_menu_banner()
         if query.message.photo:
-            await query.message.delete()
+            try: await query.message.delete()
+            except: pass
         await query.message.reply_photo(
             photo=InputFile(banner_img, filename="menu.png"),
             caption="🏠 <b>Главное меню New NFT Bot:</b>\nВыберите нужный раздел кнопками ниже:",
@@ -2334,23 +2684,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "nav_market":
         await show_market_hub(query)
-        return
-
-    if data == "market_create_offer":
-        await query.answer("⚠️ Создание офферов станет доступно после запуска улучшений!", show_alert=True)
-        return
-
-    if data.startswith("market_list:"):
-        _, category, page = data.split(":")
-        await show_market_category_list(query, category, int(page))
-        return
-
-    if data == "market_my_offers":
-        await query.answer("ℹ️ У вас пока нет активных офферов на маркете.", show_alert=True)
-        return
-
-    if data == "market_history":
-        await query.answer("📊 История сделок пока пуста.", show_alert=True)
         return
 
     if data == "bg_reset":
@@ -2621,16 +2954,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text = (
             f"🎰 <b>Mystery Cases Hub</b>\n\n"
             f"Ваш баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
-            f"1. 📦 <b>Обычный</b> — 100 ⭐\n"
-            f"2. 🔷 <b>Редкий</b> — 500 ⭐\n"
-            f"3. 🟣 <b>Эпический</b> — 2,500 ⭐\n"
-            f"4. 👑 <b>Легендарный</b> — 10,000 ⭐\n"
+            f"1. 📦 <b>Кейс 1</b> — 100 ⭐\n"
+            f"2. 🔷 <b>Кейс 2</b> — 500 ⭐\n"
+            f"3. 🟣 <b>Кейс 3</b> — 2,500 ⭐\n"
+            f"4. 👑 <b>Кейс 4</b> — 10,000 ⭐\n"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📦 Обычный кейс (100⭐)", callback_data="open_case:tier1")],
-            [InlineKeyboardButton("🔷 Редкий кейс (500⭐)", callback_data="open_case:tier2")],
-            [InlineKeyboardButton("🟣 Эпический кейс (2500⭐)", callback_data="open_case:tier3")],
-            [InlineKeyboardButton("👑 Легендарный кейс (10000⭐)", callback_data="open_case:tier4")],
+            [InlineKeyboardButton("📦 Кейс 1 (100⭐)", callback_data="open_case:tier1")],
+            [InlineKeyboardButton("🔷 Кейс 2 (500⭐)", callback_data="open_case:tier2")],
+            [InlineKeyboardButton("🟣 Кейс 3 (2500⭐)", callback_data="open_case:tier3")],
+            [InlineKeyboardButton("👑 Кейс 4 (10000⭐)", callback_data="open_case:tier4")],
             [
                 InlineKeyboardButton("🗂 Коллекция", callback_data="nav_collection_page:1"),
                 InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")
@@ -2669,8 +3002,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         cap = (
             f"🎰 <b>Открытие {tier['name']}!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🎉 Выпал: {rarity_emoji(won_gift.chance)} <b>{won_gift.name}</b>!\n"
-            f"• Редкость: <b>{rarity_label(won_gift.chance)}</b>\n"
+            f"🎉 Выпал: <b>{won_gift.name}</b>!\n"
+            f"• Модель: <b>{won_gift.model_name}</b>\n"
             f"• Ценность: <b>{fmt_stars_rub(won_gift.stars)}</b>\n\n"
             f"{res_note}"
         )
@@ -2728,7 +3061,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.edit_message_text(res, parse_mode=ParseMode.HTML, reply_markup=kb)
             return
 
-        # Просмотр профиля игрока из ТОП-100 с отказоустойчивостью
+        # Просмотр профиля игрока из ТОП-100 с фото-карточкой
         if action == "view_top_user":
             target_id = int(rest[0])
             back_page = int(rest[1])
@@ -2738,7 +3071,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.answer("🔒 Профиль скрыт настройками приватности игрока.", show_alert=True)
                 return
 
-            # Открываем полноценный профиль с фотографией и фоном!
             await show_profile_handler(query, target_id, context, back_to_top_page=back_page)
             return
 
@@ -2763,9 +3095,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ])
 
             cap = (
-                f"{rarity_emoji(g.chance)} <b>{g.name}</b>\n"
+                f"<b>{g.name}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• Редкость: <b>{rarity_label(g.chance)}</b>\n"
+                f"• Модель: <b>{g.model_name}</b>\n"
                 f"• Бонус опыта: <b>+{g.xp} XP</b>\n"
                 f"• Стоимость: {fmt_stars_rub(g.stars)}\n"
                 f"• В Избранном: <b>{'Да ⭐' if item['is_favorite'] else 'Нет'}</b>\n"
@@ -2811,10 +3143,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
 # ---------------------------------------------------------------------------
-# КОМАНДЫ БОТА
+# КОМАНДЫ БОТА (С ПРОВЕРКОЙ БАНА)
 # ---------------------------------------------------------------------------
 
+async def ensure_not_banned(update: Update) -> bool:
+    """Проверяет бан пользователя. Если забанен — выводит сообщение и прерывает выполнение."""
+    user = update.effective_user
+    if not user:
+        return True
+    is_banned, until_ts, reason, hours = is_user_banned(user.id)
+    if is_banned and user.id not in ADMIN_IDS:
+        ban_text, ban_kb = format_ban_message(until_ts, reason, hours)
+        if update.message:
+            await update.message.reply_text(ban_text, parse_mode=ParseMode.HTML, reply_markup=ban_kb)
+        return False
+    return True
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     user = update.effective_user
     get_or_create_user(user.id, user.username, user.first_name)
     banner_img = await generate_main_menu_banner()
@@ -2833,15 +3180,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     await show_info_page(update, context)
 
 async def cmd_profile_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     await show_profile_handler(update, update.effective_user.id, context)
 
 async def cmd_clans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     await show_clans_hub(update, update.effective_user.id)
 
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     await show_market_hub(update)
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2852,6 +3207,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = db_connect()
     try:
         total_users = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
+        total_banned = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned=1").fetchone()["cnt"]
         total_clans = conn.execute("SELECT COUNT(*) as cnt FROM clans").fetchone()["cnt"]
     finally:
         conn.close()
@@ -2859,17 +3215,24 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "👑 <b>Панель администратора</b>\n"
         f"• Пользователей: {total_users:,}\n"
+        f"• Заблокировано: {total_banned:,}\n"
         f"• Кланов: {total_clans:,}\n\n"
         "Выберите действие:"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Выдать Звёзды", callback_data="admin_give_stars_start")],
         [InlineKeyboardButton("🎁 Выдать NFT-подарок", callback_data="admin_give_nft_start")],
+        [
+            InlineKeyboardButton("🔨 Забанить игрока", callback_data="admin_ban_start"),
+            InlineKeyboardButton("🔓 Разбанить игрока", callback_data="admin_unban_start"),
+        ],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     sender = update.effective_user
     args = context.args
     if len(args) < 2:
@@ -2899,7 +3262,6 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_stars(target_user["user_id"], amount)
     receiver_name = normalize_telegram_name(target_user["first_name"] or target_user["username"] or "Игрок")
 
-    # Уведомление получателю перевода
     try:
         await context.bot.send_message(
             chat_id=target_user["user_id"],
@@ -2921,6 +3283,8 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_not_banned(update):
+        return
     sender = update.effective_user
     args = context.args
     if len(args) < 2:
@@ -2949,7 +3313,6 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     receiver_name = normalize_telegram_name(target_user["first_name"] or target_user["username"] or "Игрок")
 
-    # Уведомление получателю подарка
     try:
         await context.bot.send_message(
             chat_id=target_user["user_id"],
@@ -3048,9 +3411,41 @@ def main() -> None:
         allow_reentry=True
     )
 
+    # 5. FSM Бана пользователя
+    admin_ban_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_ban_start, pattern="^admin_ban_start$")],
+        states={
+            WAIT_ADMIN_BAN_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_ban_user_received)],
+            WAIT_ADMIN_BAN_HOURS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_ban_hours_received)],
+            WAIT_ADMIN_BAN_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_ban_reason_received)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", admin_cancel),
+            CallbackQueryHandler(admin_cancel, pattern="^admin_cancel$")
+        ],
+        per_message=False,
+        allow_reentry=True
+    )
+
+    # 6. FSM Разбана пользователя
+    admin_unban_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_unban_start, pattern="^admin_unban_start$")],
+        states={
+            WAIT_ADMIN_UNBAN_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_unban_user_received)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", admin_cancel),
+            CallbackQueryHandler(admin_cancel, pattern="^admin_cancel$")
+        ],
+        per_message=False,
+        allow_reentry=True
+    )
+
     app.add_handler(clan_conv)
     app.add_handler(admin_give_stars_conv)
     app.add_handler(admin_give_nft_conv)
+    app.add_handler(admin_ban_conv)
+    app.add_handler(admin_unban_conv)
     app.add_handler(bg_conv)
 
     # Команды
@@ -3070,7 +3465,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_group_message))
 
-    log.info("New NFT Gift Telegram Bot v10.0 запущен!")
+    log.info("New NFT Gift Telegram Bot v11.0 запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
