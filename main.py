@@ -20,15 +20,20 @@ New NFT Gift Telegram Bot v12.0 (Ultimate Clans & Clean Heraldry Edition)
 """
 
 import asyncio
+import atexit
 import datetime
 import html
 import io
+import json
 import logging
 import math
 import os
 import random
 import re
+import shutil
+import signal
 import sqlite3
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -56,6 +61,17 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
+# Попытка импорта Firebase Admin SDK
+try:
+    import firebase_admin
+    from firebase_admin import credentials as fb_credentials, storage as fb_storage
+    FIREBASE_ADMIN_AVAILABLE = True
+except ImportError:
+    firebase_admin = None
+    fb_credentials = None
+    fb_storage = None
+    FIREBASE_ADMIN_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Настройки и глобальные пути
 # ---------------------------------------------------------------------------
@@ -82,6 +98,240 @@ CHAT_DROP_CHANCE = 0.90                 # 90% шанс дропа при сло�
 STAR_RUB_RATE = 1.5                     # 1 Star = 1.5 RUB
 TON_RUB_RATE = 100.0                    # 1 TON = 100 RUB
 ADMIN_IDS = {684535319, 7459502130}     # Telegram ID администраторов
+
+# ---------------------------------------------------------------------------
+# Firebase Cloud Database Storage (Интеграция с проектом proar-5a642)
+# Автоматическая синхронизация файла base.db для хостинга bot host.ru
+# ---------------------------------------------------------------------------
+
+FIREBASE_SERVICE_ACCOUNT_CONFIG = {
+    "type": "service_account",
+    "project_id": "proar-5a642",
+    "private_key_id": "77fd7fd5edb3898bf3d55a10fface27e3426abe3",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCYcCxSO9yIM4ca\n2YVt5xdwOAYmUkPbDvxMx7bfi4y6TqImYCnVQ1gEnpL0pRLVfrzW/+0ct8BYgEyE\n4IIqoLwW4t5xGdkWgqgbNkY8t3pqGS0wAXjQLN9f5SPY49XoaF0Pan552g3h4ZYs\nTfdYGACZ2A8+CBKTvjBF1RHGc0BWhK7aY5MMCYyFx6WBVMM4M04K8wlXQUCESGPa\nkpQH6XmIrKuNTaETu7MjD+4rAvjyyTiL/g85TBESA1YHR1NDP6bL0KdHjv3sUpj7\n+WC9IoXzUJMZnmewBbWIVTdn4bdWbk1FlKaUk8Y0I1NR6f5cIrFOQB2vqvoTUqWY\nAfNN/7gHAgMBAAECggEADsnjIt831+bX1pz/utfOiE6HGjSk7J2ZkIFXlnxdXL3A\nMWTm6g+sfFY9/4n8N8Yh3+HYSQ7ylCNuSP3W4vfRB49e8S4Gx45JbMppKf7K23wx\nzBR4egnAafc68RG5cOCfFp3IQ14KNr3B6e5ubpd1h3dUkzoJQ1gSKtQu80e/GCWE\n0dq3d0F001wVtIIgZ79D6aTNo7j1i+U0he1BztfamRe0DZXEbJxmRSssc2ICLx7n\nBGCceyocw1k/1cpaubtiteIitwhWuXdzFwoubsPSF3dvL5kMOOudW/p6XuDtp054\nkHHXQGUlK/kr03ZgMabjuo1XcUzAnowzVA2P3gp+MQKBgQDKVkB5aiJvAOLEqsK4\nEcZ5YqOHYTU2zkO9lLiJDcN2+C69+f9D1i8UIJQotQoluDKx4mQHSsvFkBbzfU+u\n4+QKHHijVgDYtV/4IoPMsPAjGKl3o+W9+scRKhIlTymZs+Q/+AqzWLrD2fr3QJVW\n2hven8QLJua81gD4tumc9Wr5FQKBgQDA3gaKNlwzTzm2YDNOJ6V0tiH1GH01ucXS\nCOaJFKfsyJutbEHNKOad0bSjxwuvq5sw7b5lMVDd2XUTGJNdBVKTNkaEQkhq4S2N\ngL8KoML7FOTYqQIxUbfTfmY/YSR8U7Jm5OqEGFGT5xGUAmy/BWfN31KFGbW/Ujkz\nHCrIEXW7qwKBgQCFhcWmWdO/TOZYwhcdQR2onN8tR4jGUfeB89KTHvIOYFj4JTG+\nomkO7zDWbCH2IkfR+4PnDATMqvl6VQdwchLaWU+C+g408/wQ0zYGrfzKLEwpF49U\nf1k+inTPCh55v6ywSg9FqxgUhpSG9aeXWPdrQiMs+M7rbo3Vk182pP2iwQKBgEbO\n/P2vWYho9NpVVWDDQ4am+66dcBLSgqNLK0B2ufQ/7o/sJ/hnpMuaW0Sp5kt3qIF9\nN6K1SWg51zbMlgXX12o+ygLyxt2ekHfcJceEIDHIiQBWhHyQ8PmP9YAdbSTMIbqP\nHt6igwjXE+gQP9ad6G94JzbAqq50RJXUKIzNhDkDAoGBALy11Sh60zRtyiHc/ey7\nP+7Idr+kp5Jb+dpj3Jihl/ZrJNN2ciqdYX8+/BM02yzGS8TO5NzhigtiZsv2Sx75\nXJWnqbguNw6r9OnxkgCkKfDV0ZVjZmQiU6WkdGYNL0yJXqU4B13B0poxw/e1qnqo\nJOjwNN4j2k7xeDxglv04laVH\n-----END PRIVATE KEY-----\n",
+    "client_email": "firebase-adminsdk-fbsvc@proar-5a642.iam.gserviceaccount.com",
+    "client_id": "103737744652283306114",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40proar-5a642.iam.gserviceaccount.com",
+    "universe_domain": "googleapis.com"
+}
+
+class FirebaseStorageManager:
+    """
+    Управляет безопасным хранением базы SQLite (base.db) в Firebase Storage.
+    Гарантирует сохранение данных при перезапусках контейнера bot host.ru.
+    """
+    def __init__(self):
+        self.app = None
+        self.bucket = None
+        self.bucket_name = os.environ.get("FIREBASE_STORAGE_BUCKET", "proar-5a642.firebasestorage.app")
+        self.initialized = False
+        self.last_sync_ts: float = 0.0
+        self.last_sync_size: int = 0
+        self.last_sync_status: str = "Ожидает первой синхронизации"
+        self._lock = threading.Lock()
+        self._sync_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._dirty = False
+
+    def init_app(self) -> bool:
+        if not FIREBASE_ADMIN_AVAILABLE:
+            log.warning("[Firebase] Библиотека firebase-admin не установлена. На bot host.ru выполните: pip install firebase-admin")
+            self.last_sync_status = "Ошибка: firebase-admin не установлен"
+            return False
+
+        if self.initialized and self.bucket:
+            return True
+
+        try:
+            # 1. Поиск конфига: внешний файл или встроенный
+            cred_dict = FIREBASE_SERVICE_ACCOUNT_CONFIG
+            for candidate in [BASE_DIR / "firebase-service-account.json", BASE_DIR / "firebase_credentials.json"]:
+                if candidate.exists():
+                    try:
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            cred_dict = json.load(f)
+                            break
+                    except Exception:
+                        pass
+
+            cred = fb_credentials.Certificate(cred_dict)
+
+            try:
+                self.app = firebase_admin.get_app()
+            except ValueError:
+                self.app = firebase_admin.initialize_app(cred, {
+                    "storageBucket": self.bucket_name
+                })
+
+            try:
+                self.bucket = fb_storage.bucket(self.bucket_name, app=self.app)
+            except Exception:
+                alt_bucket = "proar-5a642.appspot.com"
+                self.bucket = fb_storage.bucket(alt_bucket, app=self.app)
+                self.bucket_name = alt_bucket
+
+            self.initialized = True
+            log.info(f"[Firebase] ✅ Подключено к проекту proar-5a642, бакет: {self.bucket_name}")
+            return True
+        except Exception as e:
+            log.error(f"[Firebase] ❌ Ошибка подключения к Firebase: {e}")
+            self.last_sync_status = f"Ошибка инициализации: {e}"
+            return False
+
+    @staticmethod
+    def is_valid_sqlite(path: Path) -> bool:
+        if not path.exists() or path.stat().st_size < 100:
+            return False
+        try:
+            with open(path, "rb") as f:
+                header = f.read(16)
+                return header == b"SQLite format 3\x00"
+        except Exception:
+            return False
+
+    def download_db_on_startup(self) -> bool:
+        """
+        Скачивает сохраненную base.db из Firebase Storage ПЕРЕД запуском базы.
+        Если база в облаке найдена — загружает ее, сохраняя всех игроков и кланы.
+        Если нет — возвращает False, чтобы создать новую базу.
+        """
+        if not self.init_app():
+            return False
+
+        try:
+            blob = self.bucket.blob("base.db")
+            if not blob.exists():
+                log.info("[Firebase] ℹ️ Файл base.db в облаке пока не создан. Будет инициализирована новая база.")
+                self.last_sync_status = "База еще не выгружалась в облако"
+                return False
+
+            blob.reload()
+            remote_size = blob.size or 0
+            if remote_size < 100:
+                log.warning(f"[Firebase] ⚠️ Удаленный base.db подозрительно мал ({remote_size} байт). Пропуск скачивания.")
+                return False
+
+            tmp_path = BASE_DIR / "base.db.tmp_download"
+            log.info(f"[Firebase] 📥 Найдена сохраненная база в облаке ({remote_size:,} байт). Скачивание...")
+            blob.download_to_filename(str(tmp_path))
+
+            if not self.is_valid_sqlite(tmp_path):
+                log.error("[Firebase] ❌ Скачанный файл поврежден. Отмена замены базы.")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                return False
+
+            if DB_PATH.exists():
+                try:
+                    shutil.copy2(DB_PATH, BASE_DIR / "base.db.backup_local")
+                except Exception:
+                    pass
+
+            shutil.move(tmp_path, DB_PATH)
+            self.last_sync_ts = time.time()
+            self.last_sync_size = remote_size
+            self.last_sync_status = f"Восстановлена из облака ({remote_size:,} байт)"
+            log.info(f"[Firebase] ✅ База base.db успешно восстановлена из Firebase Storage! Игроки и кланы сохранены.")
+            return True
+        except Exception as e:
+            log.error(f"[Firebase] Ошибка при скачивании base.db: {e}")
+            self.last_sync_status = f"Ошибка скачивания: {e}"
+            return False
+
+    def upload_db_to_cloud(self, force: bool = False) -> bool:
+        """
+        Выгружает локальный base.db в Firebase Storage.
+        СТРОГАЯ ЗАЩИТА: Ни в коем случае не перезаписывает облако пустым или поврежденным файлом.
+        """
+        if not self.init_app():
+            return False
+
+        with self._lock:
+            try:
+                if not DB_PATH.exists() or DB_PATH.stat().st_size < 100:
+                    log.warning("[Firebase] 🛑 Отмена выгрузки: локальный base.db пуст или не существует. Защита от очистки активна!")
+                    return False
+
+                if not self.is_valid_sqlite(DB_PATH):
+                    log.error("[Firebase] 🛑 Отмена выгрузки: локальный base.db поврежден. Облако защищено от затирания.")
+                    return False
+
+                current_size = DB_PATH.stat().st_size
+
+                if not force and self.last_sync_ts > 0 and (time.time() - self.last_sync_ts < 15):
+                    return True
+
+                snapshot_path = BASE_DIR / "base.db.upload_snapshot"
+                try:
+                    src_conn = sqlite3.connect(DB_PATH)
+                    dst_conn = sqlite3.connect(snapshot_path)
+                    src_conn.backup(dst_conn)
+                    dst_conn.close()
+                    src_conn.close()
+                    target_file = snapshot_path
+                except Exception:
+                    target_file = DB_PATH
+
+                blob = self.bucket.blob("base.db")
+                blob.upload_from_filename(str(target_file), content_type="application/x-sqlite3")
+
+                if snapshot_path.exists():
+                    try:
+                        snapshot_path.unlink()
+                    except Exception:
+                        pass
+
+                self.last_sync_ts = time.time()
+                self.last_sync_size = current_size
+                self.last_sync_status = f"Синхронизировано в {datetime.datetime.now().strftime('%H:%M:%S')} ({current_size:,} байт)"
+                self._dirty = False
+                log.info(f"[Firebase] ☁️ База base.db успешно выгружена в Firebase Storage ({current_size:,} байт)")
+                return True
+            except Exception as e:
+                log.error(f"[Firebase] Ошибка выгрузки base.db: {e}")
+                self.last_sync_status = f"Ошибка выгрузки: {e}"
+                return False
+
+    def schedule_sync(self):
+        """Отмечает базу как измененную для фоновой синхронизации."""
+        self._dirty = True
+
+    def start_periodic_sync(self, interval_seconds: int = 60):
+        """Запускает фоновый поток периодической синхронизации."""
+        if self._sync_thread and self._sync_thread.is_alive():
+            return
+
+        def _worker():
+            while not self._stop_event.is_set():
+                self._stop_event.wait(interval_seconds)
+                if self._stop_event.is_set():
+                    break
+                try:
+                    self.upload_db_to_cloud(force=False)
+                except Exception as e:
+                    log.error(f"[Firebase Worker] Ошибка: {e}")
+
+        self._sync_thread = threading.Thread(target=_worker, daemon=True, name="FirebaseSyncWorker")
+        self._sync_thread.start()
+        log.info(f"[Firebase] Фоновая синхронизация базы активирована (интервал: {interval_seconds} сек)")
+
+    def stop(self):
+        self._stop_event.set()
+        if self.initialized:
+            self.upload_db_to_cloud(force=True)
+
+firebase_manager = FirebaseStorageManager()
+
+def _on_shutdown():
+    try:
+        firebase_manager.upload_db_to_cloud(force=True)
+    except Exception:
+        pass
+
+atexit.register(_on_shutdown)
 
 # FSM Состояния
 (
@@ -405,6 +655,7 @@ def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    firebase_manager.schedule_sync()
     return conn
 
 def db_init() -> None:
@@ -490,7 +741,7 @@ def db_init() -> None:
         # Миграция колонок clans
         clan_cols = [row["name"] for row in conn.execute("PRAGMA table_info(clans)").fetchall()]
         if "id_num" not in clan_cols:
-            conn.execute("ALTER TABLE clans ADD COLUMN id_num INTEGER UNIQUE DEFAULT NULL;")
+            conn.execute("ALTER TABLE clans ADD COLUMN id_num INTEGER DEFAULT NULL;")
         if "xp" not in clan_cols:
             conn.execute("ALTER TABLE clans ADD COLUMN xp INTEGER NOT NULL DEFAULT 0;")
         if "donated_stars" not in clan_cols:
@@ -504,6 +755,8 @@ def db_init() -> None:
 
         # Миграция колонок users
         user_cols = [row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "id_num" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN id_num INTEGER DEFAULT NULL;")
         if "clan_id" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN clan_id INTEGER DEFAULT NULL;")
         if "bg_image_path" not in user_cols:
@@ -517,11 +770,18 @@ def db_init() -> None:
         if "ban_hours" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN ban_hours INTEGER NOT NULL DEFAULT 0;")
 
-        # Инициализация сквозной нумерации для существующих кланов без id_num
+        # Инициализация сквозной нумерации для существующих кланов и игроков без id_num
         unlinked_clans = conn.execute("SELECT id FROM clans WHERE id_num IS NULL").fetchall()
         for c in unlinked_clans:
             cur = conn.execute("INSERT INTO global_id_seq (entity_type) VALUES ('clan')")
             conn.execute("UPDATE clans SET id_num=? WHERE id=?", (cur.lastrowid, c["id"]))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_clans_id_num ON clans(id_num);")
+
+        unlinked_users = conn.execute("SELECT user_id FROM users WHERE id_num IS NULL").fetchall()
+        for u in unlinked_users:
+            cur = conn.execute("INSERT INTO global_id_seq (entity_type) VALUES ('user')")
+            conn.execute("UPDATE users SET id_num=? WHERE user_id=?", (cur.lastrowid, u["user_id"]))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_id_num ON users(id_num);")
 
         conn.commit()
     finally:
@@ -2453,7 +2713,50 @@ async def show_admin_panel(query) -> None:
             InlineKeyboardButton("🔨 Забанить игрока", callback_data="admin_ban_start"),
             InlineKeyboardButton("🔓 Разбанить игрока", callback_data="admin_unban_start"),
         ],
+        [InlineKeyboardButton("☁️ Firebase Облако (base.db)", callback_data="admin_firebase_menu")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+    ])
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_admin_firebase_menu(query) -> None:
+    status_icon = "🟢" if FIREBASE_ADMIN_AVAILABLE and firebase_manager.initialized else ("🟡" if FIREBASE_ADMIN_AVAILABLE else "⚠️")
+    status_msg = (
+        "Подключено к Firebase Storage" if FIREBASE_ADMIN_AVAILABLE and firebase_manager.initialized
+        else "SDK доступен (готов к синхронизации)" if FIREBASE_ADMIN_AVAILABLE
+        else "Библиотека firebase-admin не найдена (pip install firebase-admin)"
+    )
+
+    db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    if firebase_manager.last_sync_ts > 0:
+        diff = int(time.time() - firebase_manager.last_sync_ts)
+        ago_str = f"{diff} сек. назад"
+    else:
+        ago_str = "еще не производилась"
+
+    text = (
+        "☁️ <b>Управление облачной базой Firebase</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"• Проект: <b>proar-5a642</b>\n"
+        f"• Бакет: <code>{firebase_manager.bucket_name}</code>\n"
+        f"• Облачный файл: <b>base.db</b>\n"
+        f"• Статус SDK: {status_icon} <b>{status_msg}</b>\n"
+        f"• Локальная база: <b>{db_size:,} байт</b>\n"
+        f"• Синхронизация: <b>{firebase_manager.last_sync_status}</b> ({ago_str})\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🛡️ <b>Защита от очистки базы (Anti-Wipe):</b>\n"
+        "Бот сначала скачивает сохраненную базу из облака при старте на bot host.ru. "
+        "Пустая база никогда не затирает облачные данные игроков и кланов!\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Выгрузить в облако сейчас", callback_data="admin_firebase_sync")],
+        [InlineKeyboardButton("📥 Восстановить из облака", callback_data="admin_firebase_restore")],
+        [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
     ])
 
     if query.message.photo:
@@ -3315,6 +3618,39 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await show_admin_panel(query)
         return
 
+    if data == "admin_firebase_menu":
+        if user.id not in ADMIN_IDS:
+            await query.answer("❌ Доступ запрещен!", show_alert=True)
+            return
+        await show_admin_firebase_menu(query)
+        return
+
+    if data == "admin_firebase_sync":
+        if user.id not in ADMIN_IDS:
+            await query.answer("❌ Доступ запрещен!", show_alert=True)
+            return
+        await query.answer("⏳ Выгрузка base.db в Firebase Storage...")
+        ok = firebase_manager.upload_db_to_cloud(force=True)
+        if ok:
+            await query.answer("✅ База base.db успешно выгружена в Firebase Storage!", show_alert=True)
+        else:
+            await query.answer("❌ Ошибка синхронизации. Проверьте pip install firebase-admin или логи.", show_alert=True)
+        await show_admin_firebase_menu(query)
+        return
+
+    if data == "admin_firebase_restore":
+        if user.id not in ADMIN_IDS:
+            await query.answer("❌ Доступ запрещен!", show_alert=True)
+            return
+        await query.answer("⏳ Скачивание базы из Firebase...")
+        ok = firebase_manager.download_db_on_startup()
+        if ok:
+            await query.answer("📥 База base.db успешно восстановлена из облака!", show_alert=True)
+        else:
+            await query.answer("❌ Не удалось восстановить базу. Возможно, файла еще нет в облаке.", show_alert=True)
+        await show_admin_firebase_menu(query)
+        return
+
     # Клановые профили и действия
     if data == "nav_clans_hub":
         await show_clans_hub(query, user.id, context)
@@ -3917,6 +4253,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("🔨 Забанить игрока", callback_data="admin_ban_start"),
             InlineKeyboardButton("🔓 Разбанить игрока", callback_data="admin_unban_start"),
         ],
+        [InlineKeyboardButton("☁️ Firebase Облако (base.db)", callback_data="admin_firebase_menu")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
     ])
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -4030,7 +4367,26 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # 1. Попытка восстановить сохраненную базу base.db из Firebase Storage ПЕРЕД запуском
+    # Защищает данные игроков и кланов от удаления при перезапуске на bot host.ru
+    db_restored = False
+    try:
+        db_restored = firebase_manager.download_db_on_startup()
+    except Exception as e:
+        log.error(f"[Firebase] Ошибка скачивания базы при старте: {e}")
+
+    # 2. Инициализация локальной базы SQLite и миграция таблиц
     db_init()
+
+    # 3. Если базы в облаке еще не было, выгружаем свежесозданную базу в Firebase
+    if not db_restored:
+        try:
+            firebase_manager.upload_db_to_cloud(force=True)
+        except Exception as e:
+            log.error(f"[Firebase] Ошибка первой выгрузки базы в облако: {e}")
+
+    # 4. Запускаем периодическую фоновую синхронизацию базы (каждые 60 сек)
+    firebase_manager.start_periodic_sync(interval_seconds=60)
 
     request = HTTPXRequest(
         connect_timeout=30.0,
