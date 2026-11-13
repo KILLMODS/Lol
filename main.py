@@ -78,6 +78,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
+PLUSHPEPE_MODELS_DIR = IMAGES_DIR / "plushpepe_models"
 BACKGROUNDS_DIR = IMAGES_DIR / "backgrounds"
 CLAN_AVATARS_DIR = IMAGES_DIR / "clan_avatars"
 FONTS_DIR = BASE_DIR / "fonts"
@@ -85,6 +86,7 @@ DB_PATH = BASE_DIR / "base.db"
 
 FONTS_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+PLUSHPEPE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 BACKGROUNDS_DIR.mkdir(parents=True, exist_ok=True)
 CLAN_AVATARS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -98,6 +100,11 @@ CHAT_DROP_CHANCE = 0.90                 # 90% шанс дропа при сло�
 STAR_RUB_RATE = 1.5                     # 1 Star = 1.5 RUB
 TON_RUB_RATE = 100.0                    # 1 TON = 100 RUB
 ADMIN_IDS = {684535319, 7459502130}     # Telegram ID администраторов
+
+UPGRADE_COST_STARS = 150_000            # Стоимость улучшения Plush Pepe
+MARKET_FEE_RATE = 0.15                  # Комиссия маркета 15%
+MARKET_MIN_PRICE = 1_000                # Минимальная цена лота на маркете
+MARKET_MAX_PRICE = 100_000_000_000      # Максимальная цена лота (100 млрд звёзд)
 
 # ---------------------------------------------------------------------------
 # Firebase Cloud Database Storage (Интеграция с проектом proar-5a642)
@@ -350,7 +357,9 @@ atexit.register(_on_shutdown)
     WAIT_ADMIN_UNBAN_USER,
     WAIT_CLAN_AVATAR,
     WAIT_CLAN_DONATE_STARS,
-) = range(15)
+    WAIT_MARKET_OFFER_PRICE,
+    WAIT_GIFT_TRANSFER_USER,
+) = range(17)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -603,6 +612,197 @@ def gift_image_path(key: str) -> Optional[Path]:
             return p
     return None
 
+# ---------------------------------------------------------------------------
+# КАТАЛОГ МОДЕЛЕЙ И ФОНОВ ДЛЯ УЛУЧШЕНИЯ PLUSH PEPE (50 МОДЕЛЕЙ + 60 ФОНОВ)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlushModelDef:
+    name: str
+    filename: str
+    rarity_pct: float
+    price_mult: float
+
+
+@dataclass(frozen=True)
+class BackdropDef:
+    key: str
+    name: str
+    palette: str
+    center_hex: str
+    edge_hex: str
+    chance_pct: float
+    price_mult: float
+    rarity_label: str
+
+
+PLUSHPEPE_MODELS: list[PlushModelDef] = [
+    PlushModelDef("Amalgam", "Amalgam.webp", 1.2, 1.32),
+    PlushModelDef("Aqua Plush", "Aqua Plush.webp", 2.0, 1.12),
+    PlushModelDef("Barcelona", "Barcelona.webp", 2.0, 1.15),
+    PlushModelDef("Bavaria", "Bavaria.webp", 2.0, 1.14),
+    PlushModelDef("Birmingham", "Birmingham.webp", 2.0, 1.12),
+    PlushModelDef("Christmas", "Christmas.webp", 2.0, 1.15),
+    PlushModelDef("Cold Heart", "Cold Heart.webp", 1.4, 1.28),
+    PlushModelDef("Cozy Galaxy", "Cozy Galaxy.webp", 1.2, 1.34),
+    PlushModelDef("Donatello", "Donatello.webp", 2.0, 1.16),
+    PlushModelDef("Eggplant", "Eggplant.webp", 2.2, 1.08),
+    PlushModelDef("Emerald Plush", "Emerald Plush.webp", 1.6, 1.22),
+    PlushModelDef("Emo Boi", "Emo Boi.webp", 1.5, 1.25),
+    PlushModelDef("Fifty Shades", "Fifty Shades.webp", 1.1, 1.35),
+    PlushModelDef("Frozen", "Frozen.webp", 1.8, 1.20),
+    PlushModelDef("Gucci Leap", "Gucci Leap.webp", 1.3, 1.30),
+    PlushModelDef("Gummy Frog", "Gummy Frog.webp", 2.2, 1.08),
+    PlushModelDef("Hothead", "Hothead.webp", 2.0, 1.14),
+    PlushModelDef("Hue Jester", "Hue Jester.webp", 2.0, 1.12),
+    PlushModelDef("Kung Fu Pepe", "Kung Fu Pepe.webp", 1.8, 1.20),
+    PlushModelDef("Leonardo", "Leonardo.webp", 2.0, 1.16),
+    PlushModelDef("Louis Vuittoad", "Louis Vuittoad.webp", 1.2, 1.33),
+    PlushModelDef("Magnate", "Magnate.webp", 1.6, 1.24),
+    PlushModelDef("Marble", "Marble.webp", 1.7, 1.22),
+    PlushModelDef("Midas Pepe", "Midas Pepe.webp", 1.0, 1.36),
+    PlushModelDef("Milano", "Milano.webp", 2.0, 1.14),
+    PlushModelDef("Ninja Mike", "Ninja Mike.webp", 2.0, 1.16),
+    PlushModelDef("Pepe La Rana", "Pepe La Rana.webp", 2.2, 1.10),
+    PlushModelDef("Pepemint", "Pepemint.webp", 2.2, 1.08),
+    PlushModelDef("Pink Galaxy", "Pink Galaxy.webp", 1.5, 1.25),
+    PlushModelDef("Pink Latex", "Pink Latex.webp", 1.8, 1.18),
+    PlushModelDef("Poison Dart", "Poison Dart.webp", 1.9, 1.16),
+    PlushModelDef("Polka Dots", "Polka Dots.webp", 2.4, 1.06),
+    PlushModelDef("Princess", "Princess.webp", 2.0, 1.12),
+    PlushModelDef("Pumpkin", "Pumpkin.webp", 2.1, 1.10),
+    PlushModelDef("Puppy Pug", "Puppy Pug.webp", 2.2, 1.08),
+    PlushModelDef("Raphael", "Raphael.webp", 2.0, 1.16),
+    PlushModelDef("Red Menace", "Red Menace.webp", 1.8, 1.18),
+    PlushModelDef("Red Pepple", "Red Pepple.webp", 2.1, 1.10),
+    PlushModelDef("Santa Pepe", "Santa Pepe.webp", 2.0, 1.14),
+    PlushModelDef("Sketchy", "Sketchy.webp", 1.7, 1.22),
+    PlushModelDef("Spectrum", "Spectrum.webp", 1.5, 1.26),
+    PlushModelDef("Steel Frog", "Steel Frog.webp", 1.4, 1.28),
+    PlushModelDef("Stripes", "Stripes.webp", 2.3, 1.06),
+    PlushModelDef("Sunset", "Sunset.webp", 2.1, 1.10),
+    PlushModelDef("Toading...", "Toading....webp", 1.9, 1.17),
+    PlushModelDef("Tropical", "Tropical.webp", 2.3, 1.06),
+    PlushModelDef("Two Face", "Two Face.webp", 1.3, 1.30),
+    PlushModelDef("X-Ray", "X-Ray.webp", 1.1, 1.35),
+    PlushModelDef("Yellow Hug", "Yellow Hug.webp", 2.4, 1.05),
+    PlushModelDef("Yellow Purp", "Yellow Purp.webp", 2.3, 1.06),
+]
+
+PLUSHPEPE_MODELS_BY_NAME = {m.name: m for m in PLUSHPEPE_MODELS}
+
+# 60 официальных фонов (сумм. шанс = 100.00%):
+# Чёрные / тёмные / серые — минимальные шансы (0.15%–0.65%) и максимальный множитель цены.
+# Яркие, неоновые и пастельные — высокие шансы (2.00%–3.10%).
+PLUSHPEPE_BACKDROPS: list[BackdropDef] = [
+    # Ультра-редкие чёрные и серые (0.15% - 0.45%)
+    BackdropDef("black", "Black", "Глубокий чёрный", "#1F1F23", "#0A0A0C", 0.15, 12.5, "Ультра-редкий"),
+    BackdropDef("onyx_black", "Onyx Black", "Ониксовый чёрный", "#4C5153", "#2B2E30", 0.20, 11.5, "Ультра-редкий"),
+    BackdropDef("obsidian", "Obsidian", "Обсидиановый тёмный", "#34363D", "#17181C", 0.25, 10.8, "Ультра-редкий"),
+    BackdropDef("dark_graphite", "Dark Graphite", "Тёмный графит", "#4A4E57", "#222429", 0.30, 10.0, "Ультра-редкий"),
+    BackdropDef("charcoal", "Charcoal", "Угольно-серый", "#545861", "#2D3036", 0.35, 9.2, "Ультра-редкий"),
+    BackdropDef("pure_gold", "Pure Gold", "Чистое золото", "#DFB852", "#8E6B1A", 0.35, 9.5, "Ультра-редкий"),
+    BackdropDef("battleship_grey", "Battleship Grey", "Стальной серый", "#7B838A", "#4E545A", 0.40, 8.5, "Ультра-редкий"),
+    BackdropDef("roman_silver", "Roman Silver", "Римское серебро", "#A2A9B2", "#6B717A", 0.45, 8.0, "Ультра-редкий"),
+
+    # Редкие тёмные и металлические (0.50% - 0.90%)
+    BackdropDef("satin_gold", "Satin Gold", "Сатиновое золото", "#BE9B47", "#856A29", 0.50, 7.5, "Редкий"),
+    BackdropDef("midnight_blue", "Midnight Blue", "Полуночный синий", "#5B6884", "#2E384D", 0.55, 7.2, "Редкий"),
+    BackdropDef("gunmetal", "Gunmetal", "Оружейный металл", "#6A737D", "#3B4148", 0.60, 6.8, "Редкий"),
+    BackdropDef("platinum", "Platinum", "Платиновый серый", "#BAC2CC", "#7C838C", 0.65, 6.5, "Редкий"),
+    BackdropDef("old_gold", "Old Gold", "Античное золото", "#C7A44E", "#7A6021", 0.70, 6.2, "Редкий"),
+    BackdropDef("indigo_dye", "Indigo Dye", "Глубокий индиго", "#4D5F8E", "#263254", 0.75, 5.8, "Редкий"),
+    BackdropDef("burgundy", "Burgundy", "Благородный бордо", "#8E3B4E", "#521D29", 0.80, 5.5, "Редкий"),
+    BackdropDef("dark_violet", "Dark Violet", "Тёмный фиолет", "#6E4F8E", "#3B2652", 0.85, 5.2, "Редкий"),
+    BackdropDef("pine_green", "Pine Green", "Тёмно-хвойный", "#3E6E5B", "#1E4234", 0.85, 5.0, "Редкий"),
+    BackdropDef("deep_bronze", "Deep Bronze", "Тёмная бронза", "#9B6D49", "#5E3E24", 0.90, 4.8, "Редкий"),
+
+    # Средне-редкие насыщенные (1.00% - 1.70%)
+    BackdropDef("sapphire", "Sapphire", "Сапфировый синий", "#4675C0", "#254885", 1.00, 4.5, "Необычный"),
+    BackdropDef("emerald", "Emerald", "Изумрудный", "#3BA87A", "#1E6B4B", 1.05, 4.4, "Необычный"),
+    BackdropDef("carmine", "Carmine", "Карминовый красный", "#B83B52", "#7A1E30", 1.10, 4.3, "Необычный"),
+    BackdropDef("cobalt_blue", "Cobalt Blue", "Кобальтовый синий", "#486EE0", "#2744A1", 1.15, 4.2, "Необычный"),
+    BackdropDef("celtic_blue", "Celtic Blue", "Кельтский синий", "#4980B8", "#285382", 1.20, 4.1, "Необычный"),
+    BackdropDef("deep_cyan", "Deep Cyan", "Глубокий циан", "#3A94A3", "#1D5E69", 1.25, 4.0, "Необычный"),
+    BackdropDef("chestnut", "Chestnut", "Каштановый", "#A15B47", "#6B3626", 1.30, 3.9, "Необычный"),
+    BackdropDef("chocolate", "Chocolate", "Шоколадный", "#8E624A", "#573827", 1.35, 3.8, "Необычный"),
+    BackdropDef("plum", "Plum", "Сливовый", "#8F4E87", "#592A53", 1.40, 3.7, "Необычный"),
+    BackdropDef("steel_blue", "Steel Blue", "Стальной синий", "#6185A8", "#3A5673", 1.45, 3.6, "Необычный"),
+    BackdropDef("hunter_green", "Hunter Green", "Лесной зелёный", "#4B8A5C", "#295735", 1.50, 3.5, "Необычный"),
+    BackdropDef("copper", "Copper", "Медный", "#C47A53", "#874B2C", 1.55, 3.4, "Необычный"),
+    BackdropDef("crimson", "Crimson", "Малиново-алый", "#D64561", "#94253B", 1.60, 3.3, "Необычный"),
+    BackdropDef("royal_purple", "Royal Purple", "Королевский пурпур", "#8257C9", "#4F2E8C", 1.70, 3.2, "Необычный"),
+
+    # Яркие и частые фоны (2.00% - 3.10%)
+    BackdropDef("cyberpunk", "Cyberpunk", "Неоновый киберпанк", "#858DF2", "#694FD6", 2.00, 3.0, "Обычный"),
+    BackdropDef("electric_indigo", "Electric Indigo", "Электрический индиго", "#7B68EE", "#4E3BC4", 2.00, 3.0, "Обычный"),
+    BackdropDef("electric_purple", "Electric Purple", "Электрический фиолет", "#B266FF", "#7C32D6", 2.10, 2.9, "Обычный"),
+    BackdropDef("neon_blue", "Neon Blue", "Неоновый синий", "#4DA6FF", "#2171D6", 2.10, 2.9, "Обычный"),
+    BackdropDef("azure_blue", "Azure Blue", "Яркий лазурный", "#52B2F5", "#267CC2", 2.20, 2.8, "Обычный"),
+    BackdropDef("amber", "Amber", "Яркий янтарный", "#F5A623", "#C4760C", 2.20, 2.8, "Обычный"),
+    BackdropDef("jade_green", "Jade Green", "Яркий нефритовый", "#49C495", "#268C64", 2.25, 2.8, "Обычный"),
+    BackdropDef("aquamarine", "Aquamarine", "Яркий аквамарин", "#5CE0C8", "#2B9E8A", 2.30, 2.7, "Обычный"),
+    BackdropDef("turquoise", "Turquoise", "Яркий бирюзовый", "#45D3D3", "#1F9191", 2.35, 2.7, "Обычный"),
+    BackdropDef("lavender", "Lavender", "Лавандовый", "#B49DF2", "#7F66C9", 2.40, 2.7, "Обычный"),
+    BackdropDef("periwinkle", "Periwinkle", "Барвинковый", "#95A9F5", "#6076C9", 2.45, 2.6, "Обычный"),
+    BackdropDef("sky_blue", "Sky Blue", "Небесно-голубой", "#75C8FF", "#3C95D6", 2.50, 2.6, "Обычный"),
+    BackdropDef("mint_green", "Mint Green", "Яркая мята", "#6EEB9E", "#35AB62", 2.55, 2.6, "Обычный"),
+    BackdropDef("coral_red", "Coral Red", "Яркий коралловый", "#FF786B", "#CF4538", 2.60, 2.5, "Обычный"),
+    BackdropDef("strawberry", "Strawberry", "Клубничный", "#FF6B8B", "#CC3757", 2.65, 2.5, "Обычный"),
+    BackdropDef("hot_pink", "Hot Pink", "Ярко-розовый", "#FF6EC7", "#C93892", 2.70, 2.5, "Обычный"),
+    BackdropDef("magenta", "Magenta", "Яркая маджента", "#F05BD9", "#B52C9F", 2.75, 2.5, "Обычный"),
+    BackdropDef("fuchsia", "Fuchsia", "Яркая фуксия", "#FF54B0", "#C2277B", 2.80, 2.4, "Обычный"),
+    BackdropDef("tangerine", "Tangerine", "Яркий мандариновый", "#FF9945", "#CC6418", 2.80, 2.4, "Обычный"),
+    BackdropDef("sunset_orange", "Sunset Orange", "Закатный оранж", "#FF8559", "#CC5129", 2.85, 2.4, "Обычный"),
+    BackdropDef("flamingo", "Flamingo", "Розовый фламинго", "#FF8EB8", "#CF5784", 2.90, 2.4, "Обычный"),
+    BackdropDef("bubblegum", "Bubblegum", "Яркий бабл-гам", "#FF9EE0", "#CC62AB", 2.95, 2.3, "Обычный"),
+    BackdropDef("peach", "Peach", "Персиковый", "#FFB07D", "#D47742", 3.00, 2.3, "Обычный"),
+    BackdropDef("mango", "Mango", "Сочный манго", "#FFBF47", "#D18715", 3.00, 2.3, "Обычный"),
+    BackdropDef("sunny_yellow", "Sunny Yellow", "Солнечно-жёлтый", "#FFE04D", "#CFA617", 2.85, 2.2, "Обычный"),
+    BackdropDef("lemon", "Lemon", "Лимонный", "#F2EE57", "#BFB822", 2.85, 2.2, "Обычный"),
+    BackdropDef("lime_green", "Lime Green", "Ярко-лаймовый", "#A8EE4D", "#6EB51B", 2.85, 2.2, "Обычный"),
+    BackdropDef("acid_green", "Acid Green", "Кислотно-салатовый", "#84FF5C", "#45C223", 2.85, 2.2, "Обычный"),
+]
+
+BACKDROPS_BY_KEY = {b.key: b for b in PLUSHPEPE_BACKDROPS}
+
+MARKET_PRICE_TIERS = {
+    "m1": ("1,000 — 500,000 ⭐", 1_000, 500_000),
+    "m2": ("500,000 — 2,000,000 ⭐", 500_001, 2_000_000),
+    "m3": ("2,000,000 — 10,000,000 ⭐", 2_000_001, 10_000_000),
+    "m4": ("От 10,000,000 ⭐", 10_000_001, 100_000_000_000),
+}
+
+def plush_model_image_path(filename: str) -> Optional[Path]:
+    if not filename:
+        return None
+    p = PLUSHPEPE_MODELS_DIR / filename
+    if p.exists():
+        return p
+    return None
+
+def roll_plush_model() -> PlushModelDef:
+    available = [m for m in PLUSHPEPE_MODELS if plush_model_image_path(m.filename) is not None]
+    pool = available if available else PLUSHPEPE_MODELS
+    return random.choice(pool)
+
+def roll_backdrop() -> BackdropDef:
+    weights = [b.chance_pct for b in PLUSHPEPE_BACKDROPS]
+    return random.choices(PLUSHPEPE_BACKDROPS, weights=weights, k=1)[0]
+
+def calculate_upgraded_stars(base_stars: int, model: PlushModelDef, backdrop: BackdropDef) -> int:
+    raw = base_stars * backdrop.price_mult * model.price_mult
+    return max(500_000, int(round(raw / 10_000) * 10_000))
+
+def parse_hex_rgb(hex_str: str, fallback: Tuple[int, int, int] = (40, 48, 64)) -> Tuple[int, int, int]:
+    try:
+        s = (hex_str or "").strip().lstrip("#")
+        if len(s) == 6:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        pass
+    return fallback
+
 def calculate_xp_level_info(total_xp: int) -> Tuple[int, int, int, float]:
     level = 0
     current_xp = total_xp
@@ -698,7 +898,53 @@ def db_init() -> None:
                 gift_key TEXT NOT NULL,
                 obtained_ts INTEGER NOT NULL,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
+                is_upgraded INTEGER NOT NULL DEFAULT 0,
+                model_name TEXT DEFAULT NULL,
+                model_file TEXT DEFAULT NULL,
+                model_rarity REAL NOT NULL DEFAULT 0.0,
+                bg_name TEXT DEFAULT NULL,
+                bg_palette TEXT DEFAULT NULL,
+                bg_center_hex TEXT DEFAULT NULL,
+                bg_edge_hex TEXT DEFAULT NULL,
+                bg_rarity REAL NOT NULL DEFAULT 0.0,
+                estimated_stars INTEGER NOT NULL DEFAULT 0,
+                upgraded_ts INTEGER NOT NULL DEFAULT 0,
+                is_listed INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS market_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL,
+                seller_id INTEGER NOT NULL,
+                gift_key TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                model_file TEXT NOT NULL,
+                model_rarity REAL NOT NULL DEFAULT 0.0,
+                bg_name TEXT NOT NULL,
+                bg_palette TEXT NOT NULL,
+                bg_center_hex TEXT NOT NULL,
+                bg_edge_hex TEXT NOT NULL,
+                bg_rarity REAL NOT NULL DEFAULT 0.0,
+                estimated_stars INTEGER NOT NULL DEFAULT 0,
+                price_stars INTEGER NOT NULL,
+                created_ts INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+
+            CREATE TABLE IF NOT EXISTS market_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id INTEGER NOT NULL,
+                collection_id INTEGER NOT NULL,
+                seller_id INTEGER NOT NULL,
+                buyer_id INTEGER NOT NULL,
+                gift_key TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                bg_name TEXT NOT NULL,
+                price_stars INTEGER NOT NULL,
+                fee_stars INTEGER NOT NULL,
+                seller_payout INTEGER NOT NULL,
+                sold_ts INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS pending_drops (
@@ -737,6 +983,26 @@ def db_init() -> None:
             );
             """
         )
+
+        # Миграция колонок collection
+        coll_cols = [row["name"] for row in conn.execute("PRAGMA table_info(collection)").fetchall()]
+        coll_migrations = [
+            ("is_upgraded", "INTEGER NOT NULL DEFAULT 0"),
+            ("model_name", "TEXT DEFAULT NULL"),
+            ("model_file", "TEXT DEFAULT NULL"),
+            ("model_rarity", "REAL NOT NULL DEFAULT 0.0"),
+            ("bg_name", "TEXT DEFAULT NULL"),
+            ("bg_palette", "TEXT DEFAULT NULL"),
+            ("bg_center_hex", "TEXT DEFAULT NULL"),
+            ("bg_edge_hex", "TEXT DEFAULT NULL"),
+            ("bg_rarity", "REAL NOT NULL DEFAULT 0.0"),
+            ("estimated_stars", "INTEGER NOT NULL DEFAULT 0"),
+            ("upgraded_ts", "INTEGER NOT NULL DEFAULT 0"),
+            ("is_listed", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for col_name, col_def in coll_migrations:
+            if col_name not in coll_cols:
+                conn.execute(f"ALTER TABLE collection ADD COLUMN {col_name} {col_def};")
 
         # Миграция колонок clans
         clan_cols = [row["name"] for row in conn.execute("PRAGMA table_info(clans)").fetchall()]
@@ -963,7 +1229,10 @@ def get_user_collection(user_id: int) -> list[sqlite3.Row]:
 def sell_all_non_favorites(user_id: int) -> Tuple[int, int]:
     conn = db_connect()
     try:
-        items = conn.execute("SELECT id, gift_key FROM collection WHERE user_id=? AND is_favorite=0", (user_id,)).fetchall()
+        items = conn.execute(
+            "SELECT id, gift_key FROM collection WHERE user_id=? AND is_favorite=0 AND is_upgraded=0 AND is_listed=0",
+            (user_id,),
+        ).fetchall()
         if not items:
             return 0, 0
 
@@ -1046,6 +1315,342 @@ def remove_from_collection(item_id: int, user_id: int) -> None:
     try:
         conn.execute("DELETE FROM collection WHERE id=? AND user_id=?", (item_id, user_id))
         conn.commit()
+    finally:
+        conn.close()
+
+# ---------------------------------------------------------------------------
+# ОПЕРАЦИИ УЛУЧШЕНИЯ, БЕСПЛАТНОЙ ПЕРЕДАЧИ И P2P МАРКЕТА
+# ---------------------------------------------------------------------------
+
+def upgrade_collection_item(
+    item_id: int,
+    user_id: int,
+    cost: int,
+    model: PlushModelDef,
+    backdrop: BackdropDef,
+    est_stars: int,
+) -> Tuple[bool, str]:
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        user_row = conn.execute("SELECT balance_stars FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user_row or user_row["balance_stars"] < cost:
+            conn.rollback()
+            return False, f"Недостаточно Stars! Нужно {cost:,} ⭐"
+
+        item = conn.execute("SELECT * FROM collection WHERE id=? AND user_id=?", (item_id, user_id)).fetchone()
+        if not item:
+            conn.rollback()
+            return False, "Подарок не найден в вашей коллекции."
+        if item["gift_key"] != "pepe_heart":
+            conn.rollback()
+            return False, "Улучшение доступно только для обычного Plush Pepe!"
+        if item["is_upgraded"]:
+            conn.rollback()
+            return False, "Этот Plush Pepe уже улучшен!"
+        if item["is_listed"]:
+            conn.rollback()
+            return False, "Предмет сейчас выставлен на маркет!"
+
+        conn.execute("UPDATE users SET balance_stars=balance_stars-?, xp=xp+25000 WHERE user_id=?", (cost, user_id))
+        conn.execute(
+            """
+            UPDATE collection
+            SET is_upgraded=1,
+                model_name=?,
+                model_file=?,
+                model_rarity=?,
+                bg_name=?,
+                bg_palette=?,
+                bg_center_hex=?,
+                bg_edge_hex=?,
+                bg_rarity=?,
+                estimated_stars=?,
+                upgraded_ts=?
+            WHERE id=? AND user_id=?
+            """,
+            (
+                model.name,
+                model.filename,
+                model.rarity_pct,
+                backdrop.name,
+                backdrop.palette,
+                backdrop.center_hex,
+                backdrop.edge_hex,
+                backdrop.chance_pct,
+                est_stars,
+                int(time.time()),
+                item_id,
+                user_id,
+            ),
+        )
+        conn.commit()
+        return True, "OK"
+    except Exception as e:
+        conn.rollback()
+        log.error("Ошибка улучшения подарка: %s", e)
+        return False, "Ошибка базы данных при улучшении."
+    finally:
+        conn.close()
+
+def transfer_collection_item(item_id: int, sender_id: int, recipient_id: int) -> Tuple[bool, str]:
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        item = conn.execute("SELECT * FROM collection WHERE id=? AND user_id=?", (item_id, sender_id)).fetchone()
+        if not item:
+            conn.rollback()
+            return False, "Предмет не найден в вашей коллекции."
+        if item["is_listed"]:
+            conn.rollback()
+            return False, "Нельзя передать предмет, пока он выставлен на маркете."
+
+        rec = conn.execute("SELECT max_inventory FROM users WHERE user_id=?", (recipient_id,)).fetchone()
+        if not rec:
+            conn.rollback()
+            return False, "Получатель не найден."
+        cnt = conn.execute("SELECT COUNT(*) as cnt FROM collection WHERE user_id=?", (recipient_id,)).fetchone()["cnt"]
+        if cnt >= rec["max_inventory"]:
+            conn.rollback()
+            return False, "У получателя переполнен инвентарь!"
+
+        conn.execute(
+            "UPDATE collection SET user_id=?, is_favorite=0, obtained_ts=? WHERE id=? AND user_id=?",
+            (recipient_id, int(time.time()), item_id, sender_id),
+        )
+        conn.commit()
+        return True, "OK"
+    except Exception as e:
+        conn.rollback()
+        log.error("Ошибка передачи подарка: %s", e)
+        return False, "Ошибка при передаче подарка."
+    finally:
+        conn.close()
+
+def create_market_listing(item_id: int, seller_id: int, price_stars: int) -> Tuple[bool, int, str]:
+    if price_stars < MARKET_MIN_PRICE or price_stars > MARKET_MAX_PRICE:
+        return False, 0, f"Цена должна быть от {MARKET_MIN_PRICE:,} до {MARKET_MAX_PRICE:,} ⭐!"
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        item = conn.execute("SELECT * FROM collection WHERE id=? AND user_id=?", (item_id, seller_id)).fetchone()
+        if not item:
+            conn.rollback()
+            return False, 0, "Предмет не найден в вашей коллекции."
+        if not item["is_upgraded"]:
+            conn.rollback()
+            return False, 0, "На маркет можно выставлять только улучшенные подарки!"
+        if item["is_listed"]:
+            conn.rollback()
+            return False, 0, "Этот подарок уже выставлен на маркете."
+
+        conn.execute("UPDATE collection SET is_listed=1, is_favorite=0 WHERE id=?", (item_id,))
+        cur = conn.execute(
+            """
+            INSERT INTO market_listings (
+                collection_id, seller_id, gift_key, model_name, model_file, model_rarity,
+                bg_name, bg_palette, bg_center_hex, bg_edge_hex, bg_rarity,
+                estimated_stars, price_stars, created_ts, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (
+                item["id"],
+                seller_id,
+                item["gift_key"],
+                item["model_name"] or "Plush Pepe",
+                item["model_file"] or "",
+                item["model_rarity"] or 2.0,
+                item["bg_name"] or "Black",
+                item["bg_palette"] or "Тёмный",
+                item["bg_center_hex"] or "#4C5153",
+                item["bg_edge_hex"] or "#2B2E30",
+                item["bg_rarity"] or 1.0,
+                item["estimated_stars"] or 500_000,
+                price_stars,
+                int(time.time()),
+            ),
+        )
+        listing_id = cur.lastrowid
+        conn.commit()
+        return True, listing_id, "OK"
+    except Exception as e:
+        conn.rollback()
+        log.error("Ошибка создания лота: %s", e)
+        return False, 0, "Ошибка при создании лота."
+    finally:
+        conn.close()
+
+def get_market_listings_filtered(ftype: str, fkey: str, page: int = 1, page_size: int = 8) -> Tuple[list[sqlite3.Row], int, int]:
+    conn = db_connect()
+    try:
+        where = "WHERE status='active'"
+        params: list = []
+        if ftype == "price" and fkey in MARKET_PRICE_TIERS:
+            _, min_p, max_p = MARKET_PRICE_TIERS[fkey]
+            where += " AND price_stars BETWEEN ? AND ?"
+            params.extend([min_p, max_p])
+        elif ftype == "model":
+            if fkey == "rare_dark":
+                where += " AND bg_rarity <= 0.9"
+            elif fkey in MODEL_GROUPS:
+                keys = [g.key for g in GIFTS if g.model_group == fkey]
+                if keys:
+                    placeholders = ",".join("?" for _ in keys)
+                    where += f" AND gift_key IN ({placeholders})"
+                    params.extend(keys)
+                else:
+                    return [], 1, 0
+
+        total = conn.execute(f"SELECT COUNT(*) as cnt FROM market_listings {where}", params).fetchone()["cnt"]
+        total_pages = max(1, math.ceil(total / page_size))
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * page_size
+        rows = conn.execute(
+            f"SELECT * FROM market_listings {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, offset],
+        ).fetchall()
+        return rows, total_pages, total
+    finally:
+        conn.close()
+
+def get_market_listing(listing_id: int) -> Optional[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute("SELECT * FROM market_listings WHERE id=?", (listing_id,)).fetchone()
+    finally:
+        conn.close()
+
+def get_market_listing_by_item(item_id: int) -> Optional[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM market_listings WHERE collection_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+            (item_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+def get_user_market_listings(user_id: int) -> list[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM market_listings WHERE seller_id=? AND status='active' ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+def cancel_market_listing(listing_id: int, user_id: int) -> Tuple[bool, str]:
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        lot = conn.execute("SELECT * FROM market_listings WHERE id=? AND seller_id=?", (listing_id, user_id)).fetchone()
+        if not lot or lot["status"] != "active":
+            conn.rollback()
+            return False, "Активный лот не найден."
+        conn.execute("UPDATE market_listings SET status='cancelled' WHERE id=?", (listing_id,))
+        conn.execute("UPDATE collection SET is_listed=0 WHERE id=?", (lot["collection_id"],))
+        conn.commit()
+        return True, "OK"
+    except Exception as e:
+        conn.rollback()
+        log.error("Ошибка отмены лота: %s", e)
+        return False, "Ошибка отмены лота."
+    finally:
+        conn.close()
+
+def buy_market_listing(listing_id: int, buyer_id: int) -> Tuple[bool, dict, str]:
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        lot = conn.execute("SELECT * FROM market_listings WHERE id=?", (listing_id,)).fetchone()
+        if not lot or lot["status"] != "active":
+            conn.rollback()
+            return False, {}, "Лот уже продан или снят с продажи."
+        if lot["seller_id"] == buyer_id:
+            conn.rollback()
+            return False, {}, "Нельзя купить собственный лот!"
+
+        buyer = conn.execute("SELECT balance_stars, max_inventory FROM users WHERE user_id=?", (buyer_id,)).fetchone()
+        if not buyer:
+            conn.rollback()
+            return False, {}, "Профиль покупателя не найден."
+
+        price = lot["price_stars"]
+        if buyer["balance_stars"] < price:
+            conn.rollback()
+            return False, {}, f"Недостаточно Stars! Нужно {price:,} ⭐"
+
+        cnt = conn.execute("SELECT COUNT(*) as cnt FROM collection WHERE user_id=?", (buyer_id,)).fetchone()["cnt"]
+        if cnt >= buyer["max_inventory"]:
+            conn.rollback()
+            return False, {}, "Ваш инвентарь переполнен! Расширьте слоты в «🛍 Улучшения»."
+
+        fee_stars = int(round(price * MARKET_FEE_RATE))
+        seller_payout = max(0, price - fee_stars)
+        now = int(time.time())
+
+        conn.execute("UPDATE users SET balance_stars=balance_stars-? WHERE user_id=?", (price, buyer_id))
+        conn.execute(
+            "UPDATE users SET balance_stars=balance_stars+?, total_sold=total_sold+1 WHERE user_id=?",
+            (seller_payout, lot["seller_id"]),
+        )
+        conn.execute(
+            "UPDATE collection SET user_id=?, is_listed=0, is_favorite=0, obtained_ts=? WHERE id=?",
+            (buyer_id, now, lot["collection_id"]),
+        )
+        conn.execute("UPDATE market_listings SET status='sold' WHERE id=?", (listing_id,))
+        conn.execute(
+            """
+            INSERT INTO market_history (
+                listing_id, collection_id, seller_id, buyer_id, gift_key,
+                model_name, bg_name, price_stars, fee_stars, seller_payout, sold_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                listing_id,
+                lot["collection_id"],
+                lot["seller_id"],
+                buyer_id,
+                lot["gift_key"],
+                lot["model_name"],
+                lot["bg_name"],
+                price,
+                fee_stars,
+                seller_payout,
+                now,
+            ),
+        )
+        conn.commit()
+        return True, {
+            "lot": dict(lot),
+            "price": price,
+            "fee": fee_stars,
+            "payout": seller_payout,
+        }, "OK"
+    except Exception as e:
+        conn.rollback()
+        log.error("Ошибка покупки на маркете: %s", e)
+        return False, {}, "Ошибка при проведении сделки."
+    finally:
+        conn.close()
+
+def get_market_history_rows(user_id: int, limit: int = 12) -> list[sqlite3.Row]:
+    conn = db_connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM market_history WHERE seller_id=? OR buyer_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, user_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+def get_market_stats() -> Tuple[int, int]:
+    conn = db_connect()
+    try:
+        active_cnt = conn.execute("SELECT COUNT(*) as cnt FROM market_listings WHERE status='active'").fetchone()["cnt"]
+        deals_cnt = conn.execute("SELECT COUNT(*) as cnt FROM market_history").fetchone()["cnt"]
+        return active_cnt, deals_cnt
     finally:
         conn.close()
 
@@ -1502,11 +2107,104 @@ async def generate_market_banner() -> io.BytesIO:
 
     draw.text((WIDTH // 2, 135), "NFT MARKETPLACE", font=f_title, fill=(255, 255, 255), anchor="mm")
     draw.text((WIDTH // 2, 205), "Торговая площадка для покупки и продажи улучшенных подарков", font=f_sub, fill=(209, 213, 219), anchor="mm")
-    draw.text((WIDTH // 2, 250), "Создание офферов станет доступно после запуска улучшений", font=load_font(18, bold=True), fill=(234, 179, 8), anchor="mm")
+    draw.text((WIDTH // 2, 250), "Свободные цены от 1,000 до 100 млрд STARS | Комиссия рынка 15%", font=load_font(18, bold=True), fill=(234, 179, 8), anchor="mm")
 
     bio = io.BytesIO()
     img.save(bio, "PNG")
     bio.name = "market.png"
+    bio.seek(0)
+    return bio
+
+def _make_radial_gradient_bg(size: int, center_hex: str, edge_hex: str) -> Image.Image:
+    """Создаёт плавный радиальный градиент фона как в коллекционных подарках Telegram."""
+    c_rgb = parse_hex_rgb(center_hex, (76, 81, 83))
+    e_rgb = parse_hex_rgb(edge_hex, (36, 39, 41))
+
+    # Строим градиент в уменьшенном разрешении и плавно масштабируем для высокой скорости
+    small = 160
+    grad = Image.new("RGBA", (small, small))
+    pixels = grad.load()
+    half = small / 2.0
+    max_dist = math.hypot(half, half)
+    for y in range(small):
+        dy = y - half
+        for x in range(small):
+            dx = x - half
+            t = min(1.0, (math.hypot(dx, dy) / (max_dist * 0.85)) ** 1.15)
+            r = int(c_rgb[0] * (1.0 - t) + e_rgb[0] * t)
+            g = int(c_rgb[1] * (1.0 - t) + e_rgb[1] * t)
+            b = int(c_rgb[2] * (1.0 - t) + e_rgb[2] * t)
+            pixels[x, y] = (r, g, b, 255)
+    return grad.resize((size, size), Image.Resampling.BICUBIC)
+
+async def generate_upgraded_gift_image(
+    model_file: str,
+    model_name: str,
+    bg_name: str,
+    bg_center_hex: str,
+    bg_edge_hex: str,
+    bg_rarity: float,
+    item_id: int,
+) -> io.BytesIO:
+    """Генерация карточки улучшенного Plush Pepe (модель поверх радиального фона)."""
+    SIZE = 640
+    canvas = _make_radial_gradient_bg(SIZE, bg_center_hex, bg_edge_hex)
+
+    # Лёгкие декоративные кольца и мягкое свечение по центру
+    overlay = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    c_rgb = parse_hex_rgb(bg_center_hex, (100, 116, 139))
+    glow_color = (min(255, c_rgb[0] + 65), min(255, c_rgb[1] + 65), min(255, c_rgb[2] + 65), 75)
+    od.ellipse([130, 80, 510, 460], fill=glow_color)
+    overlay = overlay.filter(ImageFilter.GaussianBlur(42))
+    canvas = Image.alpha_composite(canvas, overlay)
+
+    draw = ImageDraw.Draw(canvas)
+    # Тонкая коллекционная рамка и декоративные окружности
+    draw_rounded_rect(draw, [14, 14, SIZE - 14, SIZE - 14], radius=34, fill=None, outline=(255, 255, 255, 55), width=2)
+    draw.ellipse([120, 75, 520, 475], outline=(255, 255, 255, 32), width=2)
+
+    # Модель Plush Pepe
+    model_p = plush_model_image_path(model_file) or gift_image_path("pepe_heart")
+    if model_p and model_p.exists():
+        try:
+            m_img = Image.open(model_p).convert("RGBA")
+            m_img.thumbnail((390, 390), Image.Resampling.LANCZOS)
+            mx = (SIZE - m_img.width) // 2
+            my = 65 + (390 - m_img.height) // 2
+
+            # Мягкая тень под моделью
+            shadow = Image.new("RGBA", m_img.size, (0, 0, 0, 0))
+            alpha_ch = m_img.split()[3]
+            shadow.paste((0, 0, 0, 125), mask=alpha_ch)
+            shadow = shadow.filter(ImageFilter.GaussianBlur(14))
+            canvas.paste(shadow, (mx, my + 12), shadow)
+            canvas.paste(m_img, (mx, my), m_img)
+        except Exception as e:
+            log.warning("Ошибка рендера модели Plush Pepe %s: %s", model_file, e)
+
+    draw = ImageDraw.Draw(canvas)
+    # Верхний бейдж номера
+    draw_rounded_rect(draw, [32, 30, 210, 68], radius=14, fill=(10, 15, 25, 155), outline=(255, 255, 255, 70), width=1)
+    draw.text((121, 49), f"PLUSH PEPE #{item_id}", font=load_font(16, bold=True), fill=(255, 255, 255), anchor="mm")
+
+    # Нижняя инфо-плашка (без смайликов)
+    draw_rounded_rect(draw, [32, 488, SIZE - 32, 608], radius=22, fill=(10, 14, 22, 185), outline=(255, 255, 255, 70), width=1)
+    clean_model = strip_all_emojis_for_image(model_name)
+    clean_bg = strip_all_emojis_for_image(bg_name)
+
+    draw.text((SIZE // 2, 522), clean_model.upper(), font=load_font(28, bold=True), fill=(255, 255, 255), anchor="mm")
+    draw.text(
+        (SIZE // 2, 566),
+        f"BACKDROP: {clean_bg.upper()} ({bg_rarity:.2f}%)",
+        font=load_font(18, bold=True),
+        fill=(234, 179, 8),
+        anchor="mm",
+    )
+
+    bio = io.BytesIO()
+    canvas.save(bio, "PNG")
+    bio.name = f"plush_pepe_{item_id}.png"
     bio.seek(0)
     return bio
 
@@ -1516,7 +2214,7 @@ async def generate_profile_card_image(
     stars_balance: int,
     user_xp: int,
     rank: int,
-    favorite_gifts: List[GiftDef],
+    favorite_gifts: list,
     avatar_bytes: Optional[bytes] = None,
     clan_tag: Optional[str] = None,
     custom_bg_path: Optional[str] = None,
@@ -1616,25 +2314,49 @@ async def generate_profile_card_image(
 
     for i in range(7):
         cur_x = start_x + i * (slot_w + spacing)
-        draw_rounded_rect(draw, [cur_x, slot_y, cur_x + slot_w, slot_y + slot_h], radius=16, fill=(15, 23, 42, 210), outline=(51, 65, 85, 180), width=1)
-
         if i < len(favorite_gifts):
-            g = favorite_gifts[i]
-            img_p = gift_image_path(g.key)
+            fav = favorite_gifts[i]
+            is_upg = False
+            g_key = None
+            m_file = None
+            bg_c = None
+            bg_e = None
+            if isinstance(fav, GiftDef):
+                g = fav
+                g_key = fav.key
+            else:
+                g_key = fav["gift_key"]
+                g = GIFTS_BY_KEY.get(g_key)
+                is_upg = bool(fav["is_upgraded"]) if "is_upgraded" in fav.keys() else False
+                m_file = fav["model_file"] if "model_file" in fav.keys() else None
+                bg_c = fav["bg_center_hex"] if "bg_center_hex" in fav.keys() else None
+                bg_e = fav["bg_edge_hex"] if "bg_edge_hex" in fav.keys() else None
+
+            if is_upg and bg_c and bg_e:
+                slot_bg = _make_radial_gradient_bg(slot_w, bg_c, bg_e)
+                s_mask = Image.new("L", (slot_w, slot_h), 0)
+                ImageDraw.Draw(s_mask).rounded_rectangle([0, 0, slot_w, slot_h], radius=16, fill=255)
+                base_bg.paste(slot_bg, (cur_x, slot_y), s_mask)
+                draw_rounded_rect(draw, [cur_x, slot_y, cur_x + slot_w, slot_y + slot_h], radius=16, fill=None, outline=(234, 179, 8, 220), width=2)
+            else:
+                draw_rounded_rect(draw, [cur_x, slot_y, cur_x + slot_w, slot_y + slot_h], radius=16, fill=(15, 23, 42, 210), outline=(51, 65, 85, 180), width=1)
+
+            img_p = plush_model_image_path(m_file) if (is_upg and m_file) else (gift_image_path(g_key) if g_key else None)
             if img_p and img_p.exists():
                 try:
                     g_img = Image.open(img_p).convert("RGBA")
-                    g_img.thumbnail((78, 78))
+                    g_img.thumbnail((84 if is_upg else 78, 84 if is_upg else 78))
                     gx = cur_x + (slot_w - g_img.width) // 2
                     gy = slot_y + (slot_h - g_img.height) // 2
                     base_bg.paste(g_img, (gx, gy), g_img)
                 except Exception as e:
                     log.warning("Ошибка рендера подарка в карточке: %s", e)
-            else:
+            elif g:
                 clean_g_name = g.name.split('(')[0].strip()[:9]
                 draw.text((cur_x + slot_w // 2, slot_y + slot_h // 2 - 8), clean_g_name, font=load_font(13, bold=True), fill=(255, 255, 255), anchor="mm")
                 draw.text((cur_x + slot_w // 2, slot_y + slot_h - 22), f"{g.stars:,} Stars", font=load_font(11, bold=True), fill=(234, 179, 8), anchor="mm")
         else:
+            draw_rounded_rect(draw, [cur_x, slot_y, cur_x + slot_w, slot_y + slot_h], radius=16, fill=(15, 23, 42, 210), outline=(51, 65, 85, 180), width=1)
             cx, cy = cur_x + slot_w // 2, slot_y + slot_h // 2
             arm = 12
             thick = 3
@@ -1881,8 +2603,7 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
     except Exception as e:
         log.warning("Аватар игрока %s недоступен: %s", target_user_id, e)
 
-    fav_rows = get_favorites(target_user_id)
-    fav_gifts = [GIFTS_BY_KEY[r["gift_key"]] for r in fav_rows if r["gift_key"] in GIFTS_BY_KEY]
+    fav_rows = [r for r in get_favorites(target_user_id) if r["gift_key"] in GIFTS_BY_KEY]
     rank = get_user_rank(target_user_id)
     lvl, cur_xp, req_xp, _ = calculate_xp_level_info(db_user["xp"])
 
@@ -1897,7 +2618,7 @@ async def show_profile_handler(update_or_query, target_user_id: int, context: Co
             db_user["balance_stars"],
             db_user["xp"],
             rank,
-            fav_gifts,
+            fav_rows,
             avatar_bytes=avatar_bytes,
             clan_tag=clan_tag,
             custom_bg_path=db_user["bg_image_path"]
@@ -2392,9 +3113,9 @@ async def show_clan_favorites_menu(query, clan_id: int):
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def show_clan_donate_gift_menu(query, clan_id: int, user_id: int):
-    items = get_user_collection(user_id)
+    items = [i for i in get_user_collection(user_id) if not i["is_listed"]]
     if not items:
-        await query.answer("У вас нет предметов в коллекции для пожертвования!", show_alert=True)
+        await query.answer("У вас нет доступных предметов в коллекции для пожертвования!", show_alert=True)
         return
 
     text = (
@@ -2407,7 +3128,9 @@ async def show_clan_donate_gift_menu(query, clan_id: int, user_id: int):
     for item in items[:12]:
         g = GIFTS_BY_KEY.get(item["gift_key"])
         if not g: continue
-        buttons.append([InlineKeyboardButton(f"🎁 {g.name} ({g.stars:,}⭐)", callback_data=f"clan_donate_gift_do:{clan_id}:{item['id']}")])
+        val = item["estimated_stars"] if item["is_upgraded"] and item["estimated_stars"] else g.stars
+        label = f"✨ Plush Pepe ({item['model_name']})" if item["is_upgraded"] else g.name
+        buttons.append([InlineKeyboardButton(f"🎁 {label} ({val:,}⭐)", callback_data=f"clan_donate_gift_do:{clan_id}:{item['id']}")])
 
     buttons.append([InlineKeyboardButton("⬅️ В профиль клана", callback_data=f"clan_info:{clan_id}")])
     kb = InlineKeyboardMarkup(buttons)
@@ -2423,20 +3146,25 @@ async def execute_clan_donate_gift(query, clan_id: int, item_id: int, user_id: i
     if not item or item["user_id"] != user_id:
         await query.answer("Предмет не найден.")
         return
+    if item["is_listed"]:
+        await query.answer("Предмет выставлен на маркет!", show_alert=True)
+        return
 
     g = GIFTS_BY_KEY.get(item["gift_key"])
     if not g:
         await query.answer("Ошибка подарка.")
         return
 
+    val = item["estimated_stars"] if item["is_upgraded"] and item["estimated_stars"] else g.stars
+
     # Удаляем из коллекции игрока
     remove_from_collection(item_id, user_id)
 
     # Начисляем опыт клану и добавляем в банк
-    xp_earned = max(1, int(g.stars * 0.0008))
+    xp_earned = max(1, int(val * 0.0008))
     conn = db_connect()
     try:
-        conn.execute("UPDATE clans SET donated_stars=donated_stars+?, xp=xp+? WHERE id=?", (g.stars, xp_earned, clan_id))
+        conn.execute("UPDATE clans SET donated_stars=donated_stars+?, xp=xp+? WHERE id=?", (val, xp_earned, clan_id))
         conn.commit()
     finally:
         conn.close()
@@ -2552,37 +3280,38 @@ async def show_rules_page(query) -> None:
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
-# РАЗДЕЛ "NFT МАРКЕТ" (ФИЛЬТРЫ: ПО ЦЕНЕ И ПО МОДЕЛЯМ)
+# РАЗДЕЛ "NFT МАРКЕТ" (ПОЛНОЦЕННАЯ P2P БИРЖА С КОМИССИЕЙ 15%)
 # ---------------------------------------------------------------------------
 
 async def show_market_hub(update_or_query) -> None:
     banner_io = await generate_market_banner()
+    active_cnt, deals_cnt = get_market_stats()
 
     caption = (
         "🛒 <b>NFT Marketplace (Торговая площадка)</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Официальная P2P биржа подарков Telegram между игроками.\n\n"
-        "⚠️ <b>Важное системное уведомление:</b>\n"
-        "На маркете можно будет выставлять и покупать <b>только улучшенные подарки</b>!\n"
-        "Система улучшения подарков сейчас находится в разработке, поэтому создание офферов "
-        "и торговые сделки временно на паузе.\n"
+        "Официальная P2P биржа улучшенных подарков Telegram между игроками.\n\n"
+        f"• Активных лотов на витрине: <b>{active_cnt:,}</b>\n"
+        f"• Завершённых сделок: <b>{deals_cnt:,}</b>\n"
+        f"• Диапазон цен: <b>1,000 — 100,000,000,000 ⭐</b>\n"
+        f"• Комиссия рынка: <b>15%</b> (списывается при продаже)\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Используйте фильтры витрины по стоимости и по моделям:"
+        "Выставляйте свои улучшенные Plush Pepe или покупайте редкие экземпляры у других игроков:"
     )
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Создать оффер", callback_data="market_create_offer")],
+        [InlineKeyboardButton("➕ Выставить подарок (Оффер)", callback_data="market_create_offer")],
         [
             InlineKeyboardButton("💰 Фильтр: По стоимости", callback_data="market_filter_price_menu"),
-            InlineKeyboardButton("🧸 Фильтр: По моделям", callback_data="market_filter_model_menu"),
+            InlineKeyboardButton("🧸 Фильтр: По моделям/фонам", callback_data="market_filter_model_menu"),
         ],
-        [InlineKeyboardButton("📋 Все офферы (Каталог)", callback_data="market_view:all:all:1")],
+        [InlineKeyboardButton(f"📋 Все лоты ({active_cnt})", callback_data="market_view:all:all:1")],
         [
-            InlineKeyboardButton("🔍 Мои офферы", callback_data="market_my_offers"),
+            InlineKeyboardButton("🔍 Мои лоты", callback_data="market_my_offers"),
             InlineKeyboardButton("📊 История сделок", callback_data="market_history"),
         ],
         [
-            InlineKeyboardButton("🗂 Моя коллекция", callback_data="nav_collection_page:1"),
+            InlineKeyboardButton("✨ Улучшения", callback_data="nav_shop"),
             InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main"),
         ]
     ])
@@ -2614,7 +3343,7 @@ async def show_market_filter_price_menu(query):
         "Выберите интересующий ценовой диапазон:"
     )
     buttons = []
-    for pkey, (ptitle, _, _) in PRICE_TIERS.items():
+    for pkey, (ptitle, _, _) in MARKET_PRICE_TIERS.items():
         buttons.append([InlineKeyboardButton(ptitle, callback_data=f"market_view:price:{pkey}:1")])
     buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
     kb = InlineKeyboardMarkup(buttons)
@@ -2627,10 +3356,12 @@ async def show_market_filter_price_menu(query):
 
 async def show_market_filter_model_menu(query):
     text = (
-        "🧸 <b>Фильтр маркета по моделям подарков:</b>\n"
-        "Выберите модель Telegram Gifts:"
+        "🧸 <b>Фильтр маркета по моделям и редкости:</b>\n"
+        "Выберите категорию для поиска лотов:"
     )
-    buttons = []
+    buttons = [
+        [InlineKeyboardButton("🌑 Редкие тёмные и золотые фоны (≤0.9%)", callback_data="market_view:model:rare_dark:1")]
+    ]
     for mkey, mtitle in MODEL_GROUPS.items():
         buttons.append([InlineKeyboardButton(mtitle, callback_data=f"market_view:model:{mkey}:1")])
     buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
@@ -2643,32 +3374,321 @@ async def show_market_filter_model_menu(query):
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def show_market_view_page(query, ftype: str, fkey: str, page: int = 1):
-    items = get_gifts_filtered(ftype, fkey)
+    rows, total_pages, total_cnt = get_market_listings_filtered(ftype, fkey, page, page_size=8)
     if ftype == "price":
-        filter_name = PRICE_TIERS.get(fkey, ("По цене", 0, 0))[0]
+        filter_name = MARKET_PRICE_TIERS.get(fkey, ("По цене", 0, 0))[0]
     elif ftype == "model":
-        filter_name = MODEL_GROUPS.get(fkey, "По модели")
+        if fkey == "rare_dark":
+            filter_name = "Редкие тёмные и золотые фоны"
+        else:
+            filter_name = MODEL_GROUPS.get(fkey, "По модели")
     else:
-        filter_name = "Все модели"
+        filter_name = "Все лоты"
 
-    text = (
-        f"📋 <b>Маркет: {filter_name}</b>\n"
+    lines = [
+        f"📋 <b>Маркет: {filter_name}</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Найдено активных лотов: <b>{total_cnt}</b> (Стр. {page}/{total_pages})\n",
+    ]
+    buttons = []
+
+    if not rows:
+        lines.append("<i>Активных лотов по выбранному фильтру пока нет.</i>")
+    else:
+        lines.append("Нажмите на лот ниже, чтобы открыть картинку, редкости и купить:")
+        for lot in rows:
+            lines.append(
+                f"• 🐸 <b>{clean_html(lot['model_name'])}</b> | "
+                f"🎨 {clean_html(lot['bg_name'])} ({lot['bg_rarity']:.2f}%) — <b>{lot['price_stars']:,} ⭐</b>"
+            )
+            btn_lbl = f"🐸 {lot['model_name'][:14]} • {lot['bg_name'][:12]} ({lot['bg_rarity']:.2f}%) — {lot['price_stars']:,}⭐"
+            buttons.append([InlineKeyboardButton(btn_lbl, callback_data=f"market_lot:{lot['id']}")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"market_view:{ftype}:{fkey}:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"market_view:{ftype}:{fkey}:{page+1}"))
+    if total_cnt > 0:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton("➕ Выставить подарок", callback_data="market_create_offer")])
+    buttons.append([
+        InlineKeyboardButton("💰 По стоимости", callback_data="market_filter_price_menu"),
+        InlineKeyboardButton("🧸 По моделям", callback_data="market_filter_model_menu"),
+    ])
+    buttons.append([InlineKeyboardButton("⬅️ В витрину маркета", callback_data="nav_market")])
+    buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    text = "\n".join(lines)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_lot_detail(query, listing_id: int, viewer_id: int):
+    lot = get_market_listing(listing_id)
+    if not lot or lot["status"] != "active":
+        await query.answer("❌ Этот лот уже продан или снят с продажи.", show_alert=True)
+        await show_market_view_page(query, "all", "all", 1)
+        return
+
+    seller = get_or_create_user(lot["seller_id"], "", "")
+    seller_name = normalize_telegram_name(seller["first_name"] or seller["username"] or "Игрок")
+    seller_sys_id = seller["id_num"] if seller["id_num"] else lot["seller_id"]
+
+    fee_stars = int(round(lot["price_stars"] * MARKET_FEE_RATE))
+    seller_payout = max(0, lot["price_stars"] - fee_stars)
+    bg_obj = next((b for b in PLUSHPEPE_BACKDROPS if b.name == lot["bg_name"]), None)
+    rarity_lbl = bg_obj.rarity_label if bg_obj else ("Ультра-редкий" if lot["bg_rarity"] <= 0.45 else "Редкий")
+
+    caption = (
+        f"✨ <b>Улучшенный Plush Pepe #{lot['collection_id']}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"Всего моделей в категории: <b>{len(items)}</b>\n\n"
-        f"<i>В данный момент активных лотов от игроков не найдено.</i>\n\n"
-        f"⚠️ Напоминаем: продавать можно будет только улучшенные подарки. Торговля откроется сразу после запуска модуля улучшения!"
+        f"🧸 Модель: <b>{clean_html(lot['model_name'])}</b> (редкость: <b>{lot['model_rarity']:.1f}%</b>)\n"
+        f"🎨 Фон: <b>{clean_html(lot['bg_name'])}</b> — {clean_html(lot['bg_palette'])}\n"
+        f"💎 Шанс фона: <b>{lot['bg_rarity']:.2f}%</b> ({rarity_lbl})\n"
+        f"📊 Оценочная стоимость: <b>{fmt_stars_rub(lot['estimated_stars'])}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Продавец: <b>{clean_html(seller_name)}</b> (ID #{seller_sys_id})\n"
+        f"💰 <b>Цена покупки: {fmt_stars_rub(lot['price_stars'])}</b>\n"
+        f"🏦 <i>Комиссия маркета 15% (-{fee_stars:,} ⭐) • Продавец получит {seller_payout:,} ⭐</i>"
     )
 
+    buttons = []
+    if lot["seller_id"] == viewer_id:
+        buttons.append([InlineKeyboardButton("❌ Снять лот с продажи", callback_data=f"market_cancel:{lot['id']}")])
+    else:
+        buttons.append([InlineKeyboardButton(f"✅ Купить за {lot['price_stars']:,} ⭐", callback_data=f"market_buy:{lot['id']}")])
+    buttons.append([InlineKeyboardButton("⬅️ К списку лотов", callback_data="market_view:all:all:1")])
+    buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")])
+    kb = InlineKeyboardMarkup(buttons)
+
+    try:
+        card_io = await generate_upgraded_gift_image(
+            lot["model_file"],
+            lot["model_name"],
+            lot["bg_name"],
+            lot["bg_center_hex"],
+            lot["bg_edge_hex"],
+            lot["bg_rarity"],
+            lot["collection_id"],
+        )
+        if query.message.photo:
+            try: await query.message.delete()
+            except: pass
+        await query.message.reply_photo(
+            photo=InputFile(card_io, filename=f"lot_{lot['id']}.png"),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+        )
+        return
+    except Exception as e:
+        log.warning("Ошибка генерации фото лота: %s", e)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_create_offer_list(query, user_id: int):
+    items = [
+        i for i in get_user_collection(user_id)
+        if i["is_upgraded"] and not i["is_listed"]
+    ]
+    if not items:
+        text = (
+            "➕ <b>Выставление подарка на Маркет</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "У вас пока нет свободных <b>улучшенных подарков</b> для продажи.\n\n"
+            "Чтобы выставить подарок на маркет, сначала выбейте <b>Plush Pepe</b> (в чате по слову <code>NFT</code> или в кейсах) "
+            "и улучшите его за <b>150,000 ⭐</b> в разделе <b>«🛍 Улучшения»</b>!"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✨ Перейти в Улучшения", callback_data="nav_shop")],
+            [InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")],
+        ])
+    else:
+        text = (
+            "➕ <b>Выберите улучшенный подарок для выставления на Маркет:</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "• Можно указать любую цену от <b>1,000 ⭐</b> до <b>100,000,000,000 ⭐</b>\n"
+            "• При покупке взимается комиссия рынка <b>15%</b>."
+        )
+        buttons = []
+        for item in items[:15]:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"✨ #{item['id']} {item['model_name']} | {item['bg_name']} ({item['estimated_stars']:,}⭐)",
+                    callback_data=f"market_sell_start:{item['id']}",
+                )
+            ])
+        buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
+        kb = InlineKeyboardMarkup(buttons)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def market_sell_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    if query.message.chat.type != "private":
+        await query.answer("⚠️ Откройте личные сообщения с ботом для торговли на маркете!", show_alert=True)
+        return ConversationHandler.END
+
+    item_id = int(query.data.split(":")[1])
+    item = get_collection_item(item_id)
+    if not item or item["user_id"] != user.id:
+        await query.answer("❌ Подарок не найден.", show_alert=True)
+        return ConversationHandler.END
+    if not item["is_upgraded"]:
+        await query.answer("❌ Выставлять можно только улучшенные подарки!", show_alert=True)
+        return ConversationHandler.END
+    if item["is_listed"]:
+        await query.answer("⚠️ Этот подарок уже выставлен на маркете!", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["market_sell_item_id"] = item_id
+
+    text = (
+        f"💰 <b>Выставление лота на NFT Маркет</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• Подарок: <b>Plush Pepe #{item['id']}</b>\n"
+        f"• Модель: <b>{clean_html(item['model_name'])}</b>\n"
+        f"• Фон: <b>{clean_html(item['bg_name'])}</b> ({item['bg_rarity']:.2f}%)\n"
+        f"• Примерная цена: <b>{item['estimated_stars']:,} ⭐</b>\n\n"
+        f"Введите желаемую цену продажи в звёздах (от <b>1,000</b> до <b>100,000,000,000</b> ⭐):\n"
+        f"<i>Напоминание: при покупке удерживается комиссия 15%.</i>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="market_offer_cancel")]])
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WAIT_MARKET_OFFER_PRICE
+
+async def market_offer_price_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    raw = re.sub(r"[\s,_]", "", update.message.text.strip())
+    if not raw.isdigit():
+        await update.message.reply_text(
+            f"❌ Введите целое число звёзд от {MARKET_MIN_PRICE:,} до {MARKET_MAX_PRICE:,}:"
+        )
+        return WAIT_MARKET_OFFER_PRICE
+
+    price = int(raw)
+    if price < MARKET_MIN_PRICE or price > MARKET_MAX_PRICE:
+        await update.message.reply_text(
+            f"❌ Цена должна быть от <b>{MARKET_MIN_PRICE:,}</b> до <b>{MARKET_MAX_PRICE:,} ⭐</b>!",
+            parse_mode=ParseMode.HTML,
+        )
+        return WAIT_MARKET_OFFER_PRICE
+
+    item_id = context.user_data.get("market_sell_item_id")
+    if not item_id:
+        await update.message.reply_text("❌ Сессия истекла. Попробуйте снова.", reply_markup=quick_nav_keyboard())
+        return ConversationHandler.END
+
+    ok, listing_id, err = create_market_listing(item_id, user.id, price)
+    if not ok:
+        await update.message.reply_text(f"❌ {err}", reply_markup=quick_nav_keyboard())
+        return ConversationHandler.END
+
+    fee_stars = int(round(price * MARKET_FEE_RATE))
+    payout = max(0, price - fee_stars)
+    await update.message.reply_text(
+        f"✅ <b>Подарок успешно выставлен на NFT Маркет!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• Номер лота: <b>#{listing_id}</b>\n"
+        f"• Цена: <b>{fmt_stars_rub(price)}</b>\n"
+        f"• Комиссия 15%: <b>-{fee_stars:,} ⭐</b>\n"
+        f"• Вы получите при продаже: <b>{payout:,} ⭐</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Открыть мой лот", callback_data=f"market_lot:{listing_id}")],
+            [InlineKeyboardButton("🛒 В маркет", callback_data="nav_market")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+        ]),
+    )
+    return ConversationHandler.END
+
+async def market_offer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer("Отменено.")
+        await show_market_hub(query)
+    else:
+        await update.message.reply_text("Выставление лота отменено.", reply_markup=back_to_main_keyboard())
+    return ConversationHandler.END
+
+async def show_market_my_offers(query, user_id: int):
+    lots = get_user_market_listings(user_id)
+    if not lots:
+        text = "🔍 <b>Мои лоты на маркете</b>\n\nУ вас пока нет активных лотов."
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Выставить подарок", callback_data="market_create_offer")],
+            [InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")],
+        ])
+    else:
+        lines = [f"🔍 <b>Ваши активные лоты ({len(lots)}):</b>\n━━━━━━━━━━━━━━━━━━"]
+        buttons = []
+        for lot in lots:
+            lines.append(
+                f"• Лот #{lot['id']}: 🐸 <b>{clean_html(lot['model_name'])}</b> | "
+                f"{clean_html(lot['bg_name'])} — <b>{lot['price_stars']:,} ⭐</b>"
+            )
+            buttons.append([
+                InlineKeyboardButton(
+                    f"Лот #{lot['id']} • {lot['model_name']} ({lot['price_stars']:,}⭐)",
+                    callback_data=f"market_lot:{lot['id']}",
+                )
+            ])
+        buttons.append([InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")])
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(buttons)
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_market_history_page(query, user_id: int):
+    rows = get_market_history_rows(user_id, limit=12)
+    if not rows:
+        text = "📊 <b>История сделок</b>\n\nУ вас пока нет завершённых покупок или продаж на маркете."
+    else:
+        lines = ["📊 <b>Ваши последние сделки на маркете:</b>\n━━━━━━━━━━━━━━━━━━"]
+        for r in rows:
+            dt = datetime.datetime.fromtimestamp(r["sold_ts"]).strftime("%d.%m %H:%M")
+            if r["seller_id"] == user_id:
+                lines.append(
+                    f"🟢 <b>Продажа</b> ({dt}): {clean_html(r['model_name'])} [{clean_html(r['bg_name'])}]\n"
+                    f"   Цена: {r['price_stars']:,} ⭐ | Комиссия 15%: -{r['fee_stars']:,} ⭐ | Итог: <b>+{r['seller_payout']:,} ⭐</b>"
+                )
+            else:
+                lines.append(
+                    f"🔵 <b>Покупка</b> ({dt}): {clean_html(r['model_name'])} [{clean_html(r['bg_name'])}]\n"
+                    f"   Оплачено: <b>-{r['price_stars']:,} ⭐</b>"
+                )
+        text = "\n".join(lines)
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Создать оффер", callback_data="market_create_offer")],
-        [
-            InlineKeyboardButton("💰 По стоимости", callback_data="market_filter_price_menu"),
-            InlineKeyboardButton("🧸 По моделям", callback_data="market_filter_model_menu"),
-        ],
-        [InlineKeyboardButton("⬅️ В витрину маркета", callback_data="nav_market")],
+        [InlineKeyboardButton("⬅️ Назад в маркет", callback_data="nav_market")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
     ])
-
     if query.message.photo:
         await query.message.delete()
         await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -3336,30 +4356,73 @@ async def cancel_clan_creation(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # ---------------------------------------------------------------------------
-# МАГАЗИН УЛУЧШЕНИЙ СЛОТОВ И НАСТРОЙКИ
+# РАЗДЕЛ "УЛУЧШЕНИЯ" (PLUSH PEPE -> МОДЕЛЬ + ФОН, И СЛОТЫ ИНВЕНТАРЯ)
 # ---------------------------------------------------------------------------
 
-async def show_shop_page(query_or_msg, user_id: int) -> None:
+async def show_shop_page(query_or_msg, user_id: int, page: int = 1) -> None:
     db_user = get_or_create_user(user_id, "", "")
-    text = (
-        "🛍 <b>Магазин улучшений инвентаря</b>\n\n"
-        f"Текущие слоты коллекции: <b>{db_user['max_inventory']}</b>\n"
-        f"Ваш баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
-        "Доступные расширения слотов:\n"
-        "• <b>+10 Слотов</b> — <b>300 ⭐</b>\n"
-        "• <b>+25 Слотов</b> — <b>650 ⭐</b>\n"
-        "• <b>+50 Слотов</b> — <b>1,200 ⭐</b>"
+    all_items = get_user_collection(user_id)
+    # Сначала показываем обычных Plush Pepe (доступных к улучшению), потом остальные
+    sorted_items = sorted(
+        all_items,
+        key=lambda r: (
+            0 if (r["gift_key"] == "pepe_heart" and not r["is_upgraded"]) else (1 if r["is_upgraded"] else 2),
+            -r["id"],
+        ),
     )
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 +10 Слотов (300⭐)", callback_data="buy_slots:10:300")],
-        [InlineKeyboardButton("📦 +25 Слотов (650⭐)", callback_data="buy_slots:25:650")],
-        [InlineKeyboardButton("📦 +50 Слотов (1200⭐)", callback_data="buy_slots:50:1200")],
-        [
-            InlineKeyboardButton("🗂 В коллекцию", callback_data="nav_collection_page:1"),
-            InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")
-        ],
+    pepe_ready = sum(1 for r in all_items if r["gift_key"] == "pepe_heart" and not r["is_upgraded"])
+    pepe_upgraded = sum(1 for r in all_items if r["is_upgraded"])
+
+    lines = [
+        "✨ <b>Улучшения NFT-подарков</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"💰 Ваш баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>",
+        f"💎 Стоимость улучшения Plush Pepe: <b>{UPGRADE_COST_STARS:,} ⭐</b>",
+        f"🐸 Обычных Plush Pepe для улучшения: <b>{pepe_ready}</b> шт.",
+        f"✨ Уже улучшено подарков: <b>{pepe_upgraded}</b> шт.\n",
+    ]
+
+    buttons = []
+    if not sorted_items:
+        lines.append("<i>У вас пока нет подарков в коллекции. Выбейте Plush Pepe в чате (слово NFT) или в кейсах!</i>")
+    else:
+        lines.append("Нажмите на подарок из списка ниже, чтобы перейти к улучшению:")
+        page_size = 8
+        total_pages = max(1, math.ceil(len(sorted_items) / page_size))
+        page = max(1, min(page, total_pages))
+        chunk = sorted_items[(page - 1) * page_size : page * page_size]
+
+        for item in chunk:
+            g = GIFTS_BY_KEY.get(item["gift_key"])
+            if not g:
+                continue
+            if item["is_upgraded"]:
+                badge = "✨ [Улучшен]"
+                lbl = f"{badge} {item['model_name']} | {item['bg_name']} ({item['estimated_stars']:,}⭐)"
+            elif item["gift_key"] == "pepe_heart":
+                lbl = f"🐸 Plush Pepe #{item['id']} — Готов к улучшению!"
+            else:
+                lbl = f"🎁 {g.name.split('(')[0].strip()} ({g.stars:,}⭐)"
+            buttons.append([InlineKeyboardButton(lbl[:60], callback_data=f"upgrade_item:{item['id']}")])
+
+        if total_pages > 1:
+            nav_row = []
+            if page > 1:
+                nav_row.append(InlineKeyboardButton("◀️", callback_data=f"upgrade_page:{page-1}"))
+            nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_row.append(InlineKeyboardButton("▶️", callback_data=f"upgrade_page:{page+1}"))
+            buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton("📦 Расширить слоты инвентаря", callback_data="shop_slots_menu")])
+    buttons.append([
+        InlineKeyboardButton("🗂 Коллекция", callback_data="nav_collection_page:1"),
+        InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main"),
     ])
+
+    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup(buttons)
 
     if hasattr(query_or_msg, "message") and query_or_msg.message:
         if query_or_msg.message.photo:
@@ -3369,6 +4432,357 @@ async def show_shop_page(query_or_msg, user_id: int) -> None:
             await query_or_msg.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await query_or_msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_slots_shop_page(query, user_id: int) -> None:
+    db_user = get_or_create_user(user_id, "", "")
+    text = (
+        "📦 <b>Расширение слотов инвентаря</b>\n\n"
+        f"Текущие слоты коллекции: <b>{db_user['max_inventory']}</b>\n"
+        f"Ваш баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n\n"
+        "Доступные расширения слотов:\n"
+        "• <b>+10 Слотов</b> — <b>300 ⭐</b>\n"
+        "• <b>+25 Слотов</b> — <b>650 ⭐</b>\n"
+        "• <b>+50 Слотов</b> — <b>1,200 ⭐</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 +10 Слотов (300⭐)", callback_data="buy_slots:10:300")],
+        [InlineKeyboardButton("📦 +25 Слотов (650⭐)", callback_data="buy_slots:25:650")],
+        [InlineKeyboardButton("📦 +50 Слотов (1200⭐)", callback_data="buy_slots:50:1200")],
+        [InlineKeyboardButton("⬅️ Назад в Улучшения", callback_data="nav_shop")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+    ])
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def show_upgrade_item_preview(query, item_id: int, user_id: int) -> None:
+    item = get_collection_item(item_id)
+    if not item or item["user_id"] != user_id:
+        await query.answer("❌ Подарок не найден.", show_alert=True)
+        return
+
+    g = GIFTS_BY_KEY.get(item["gift_key"])
+    if not g:
+        await query.answer("❌ Ошибка данных подарка.", show_alert=True)
+        return
+
+    if item["is_upgraded"]:
+        bg_obj = next((b for b in PLUSHPEPE_BACKDROPS if b.name == item["bg_name"]), None)
+        rarity_lbl = bg_obj.rarity_label if bg_obj else "Редкий"
+        cap = (
+            f"✨ <b>Улучшенный Plush Pepe #{item['id']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🧸 Модель: <b>{clean_html(item['model_name'])}</b> ({item['model_rarity']:.1f}%)\n"
+            f"🎨 Фон: <b>{clean_html(item['bg_name'])}</b> — {clean_html(item['bg_palette'])}\n"
+            f"💎 Шанс фона: <b>{item['bg_rarity']:.2f}%</b> ({rarity_lbl})\n"
+            f"💰 Оценка: <b>{fmt_stars_rub(item['estimated_stars'])}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Этот подарок уже улучшен! Вы можете передать его бесплатно или выставить на маркет."
+        )
+        buttons = []
+        if not item["is_listed"]:
+            buttons.append([InlineKeyboardButton("🛒 Выставить на маркет", callback_data=f"market_sell_start:{item['id']}")])
+            buttons.append([InlineKeyboardButton("🎁 Передать бесплатно", callback_data=f"gift_transfer_start:{item['id']}")])
+        else:
+            buttons.append([InlineKeyboardButton("🔍 Лот на маркете", callback_data=f"market_lot_item:{item['id']}")])
+        buttons.append([InlineKeyboardButton("⬅️ Назад в Улучшения", callback_data="nav_shop")])
+        kb = InlineKeyboardMarkup(buttons)
+
+        try:
+            card_io = await generate_upgraded_gift_image(
+                item["model_file"], item["model_name"], item["bg_name"],
+                item["bg_center_hex"], item["bg_edge_hex"], item["bg_rarity"], item["id"]
+            )
+            if query.message.photo:
+                try: await query.message.delete()
+                except: pass
+            await query.message.reply_photo(photo=InputFile(card_io, filename=f"pepe_{item['id']}.png"), caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception as e:
+            log.warning("Ошибка фото улучшенного подарка: %s", e)
+        await query.edit_message_text(cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if item["gift_key"] != "pepe_heart":
+        text = (
+            f"🎁 <b>{g.name}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• Модель: <b>{g.model_name}</b>\n"
+            f"• Стоимость: <b>{fmt_stars_rub(g.stars)}</b>\n\n"
+            f"⚠️ <i>На данный момент улучшение до коллекционной модели и фона доступно только для <b>Plush Pepe</b>!</i>"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Назад в Улучшения", callback_data="nav_shop")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+        ])
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    db_user = get_or_create_user(user_id, "", "")
+    cap = (
+        f"🐸 <b>Улучшение Plush Pepe #{item['id']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• Текущий подарок: <b>{g.name}</b>\n"
+        f"• Базовая цена: <b>{fmt_stars_rub(g.stars)}</b>\n"
+        f"• Ваш баланс: <b>{fmt_stars_rub(db_user['balance_stars'])}</b>\n"
+        f"• Стоимость улучшения: <b>{UPGRADE_COST_STARS:,} ⭐</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🎲 <b>Что произойдёт при улучшении:</b>\n"
+        f"1. Выпадет случайная из <b>50 уникальных моделей</b> Plush Pepe.\n"
+        f"2. Выпадет случайный <b>коллекционный фон</b> (чёрные/серые фоны — ультра-редкие, яркие — частые).\n"
+        f"3. Стоимость подарка вырастет в разы (до 3–5+ млн ⭐ при редком фоне!), его можно <b>передавать бесплатно</b> и <b>продавать на маркете за свою цену</b>!"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✨ Улучшить ({UPGRADE_COST_STARS:,} ⭐)", callback_data=f"upgrade_do:{item['id']}")],
+        [InlineKeyboardButton("⬅️ Назад в Улучшения", callback_data="nav_shop")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+    ])
+
+    img_p = gift_image_path(g.key)
+    if img_p:
+        try:
+            if query.message.photo:
+                try: await query.message.delete()
+                except: pass
+            with open(img_p, "rb") as f:
+                await query.message.reply_photo(photo=InputFile(f, filename=img_p.name), caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def execute_gift_upgrade(query, item_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Защита от двойного нажатия во время 5-секундной анимации
+    upgrading_set = context.application.bot_data.setdefault("upgrading_items", set())
+    if item_id in upgrading_set:
+        await query.answer("⏳ Улучшение этого подарка уже идёт!", show_alert=True)
+        return
+
+    upgrading_set.add(item_id)
+    try:
+        model = roll_plush_model()
+        backdrop = roll_backdrop()
+        base_g = GIFTS_BY_KEY.get("pepe_heart")
+        base_stars = base_g.stars if base_g else 350_000
+        est_stars = calculate_upgraded_stars(base_stars, model, backdrop)
+
+        ok, err = upgrade_collection_item(item_id, user_id, UPGRADE_COST_STARS, model, backdrop, est_stars)
+        if not ok:
+            await query.answer(f"❌ {err}", show_alert=True)
+            return
+
+        # 5-секундная анимация улучшения (сначала появляется модель, затем фон!)
+        if query.message.photo:
+            try: await query.message.delete()
+            except: pass
+            anim_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "✨ <b>Запуск улучшения Plush Pepe...</b>\n"
+                    "<code>[▓▓░░░░░░░░] 20%</code>\n\n"
+                    "🔮 Инициализация матрицы коллекции..."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            anim_msg = await query.edit_message_text(
+                "✨ <b>Запуск улучшения Plush Pepe...</b>\n"
+                "<code>[▓▓░░░░░░░░] 20%</code>\n\n"
+                "🔮 Инициализация матрицы коллекции...",
+                parse_mode=ParseMode.HTML,
+            )
+
+        await asyncio.sleep(1.2)
+        try:
+            await anim_msg.edit_text(
+                "✨ <b>Подбор модели Plush Pepe...</b>\n"
+                "<code>[▓▓▓▓▓░░░░░] 50%</code>\n\n"
+                "🧸 Перебор 50 уникальных моделей...",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        await asyncio.sleep(1.3)
+        try:
+            await anim_msg.edit_text(
+                "✨ <b>Модель определена!</b>\n"
+                "<code>[▓▓▓▓▓▓▓░░░] 75%</code>\n\n"
+                f"🧸 Выпала модель: <b>{clean_html(model.name)}</b>!\n"
+                "🎨 Подбор цветовой палитры и редкости фона...",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        await asyncio.sleep(1.3)
+        try:
+            await anim_msg.edit_text(
+                "✨ <b>Наложение коллекционного фона...</b>\n"
+                "<code>[▓▓▓▓▓▓▓▓▓░] 95%</code>\n\n"
+                f"🧸 Модель: <b>{clean_html(model.name)}</b>\n"
+                f"🎨 Фон: <b>{clean_html(backdrop.name)}</b> ({backdrop.chance_pct:.2f}%)...",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        await asyncio.sleep(1.2)
+
+        final_cap = (
+            f"🎉 <b>УЛУЧШЕНИЕ ЗАВЕРШЕНО!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"✨ <b>Plush Pepe #{item_id}</b>\n"
+            f"🧸 Модель: <b>{clean_html(model.name)}</b> (редкость: <b>{model.rarity_pct:.1f}%</b>)\n"
+            f"🎨 Фон: <b>{clean_html(backdrop.name)}</b> — {clean_html(backdrop.palette)}\n"
+            f"💎 Шанс фона: <b>{backdrop.chance_pct:.2f}%</b> ({backdrop.rarity_label})\n"
+            f"💰 Новая стоимость: <b>{fmt_stars_rub(est_stars)}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• Бонус за улучшение: <b>+25,000 XP</b>\n"
+            f"• Теперь подарок можно <b>передавать бесплатно</b> или <b>выставить на маркет</b> по своей цене!"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛒 Выставить на маркет", callback_data=f"market_sell_start:{item_id}")],
+            [InlineKeyboardButton("🎁 Передать бесплатно", callback_data=f"gift_transfer_start:{item_id}")],
+            [
+                InlineKeyboardButton("🗂 В коллекцию", callback_data="nav_collection_page:1"),
+                InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main"),
+            ],
+        ])
+
+        try:
+            card_io = await generate_upgraded_gift_image(
+                model.filename, model.name, backdrop.name,
+                backdrop.center_hex, backdrop.edge_hex, backdrop.chance_pct, item_id
+            )
+            try: await anim_msg.delete()
+            except Exception: pass
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=InputFile(card_io, filename=f"upgraded_pepe_{item_id}.png"),
+                caption=final_cap,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+        except Exception as e:
+            log.warning("Не удалось отправить фото улучшенного Пепе: %s", e)
+            await anim_msg.edit_text(final_cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+    finally:
+        upgrading_set.discard(item_id)
+
+# ---------------------------------------------------------------------------
+# БЕСПЛАТНАЯ ПЕРЕДАЧА УЛУЧШЕННОГО ПОДАРКА (FSM)
+# ---------------------------------------------------------------------------
+
+async def gift_transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    if query.message.chat.type != "private":
+        await query.answer("⚠️ Откройте личные сообщения с ботом для передачи подарка!", show_alert=True)
+        return ConversationHandler.END
+
+    item_id = int(query.data.split(":")[1])
+    item = get_collection_item(item_id)
+    if not item or item["user_id"] != user.id:
+        await query.answer("❌ Подарок не найден.", show_alert=True)
+        return ConversationHandler.END
+    if item["is_listed"]:
+        await query.answer("❌ Сначала снимите подарок с маркета!", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["transfer_item_id"] = item_id
+    label = f"✨ Plush Pepe #{item['id']} ({item['model_name']} | {item['bg_name']})" if item["is_upgraded"] else f"🎁 Подарок #{item['id']}"
+    text = (
+        f"🎁 <b>Бесплатная передача подарка</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Выбран предмет: <b>{clean_html(label)}</b>\n\n"
+        f"Введите <b>Telegram ID</b>, внутренний <b>ID #</b> или <b>@username</b> игрока, которому хотите подарить этот NFT (передача абсолютно бесплатна — 0 ⭐):"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="gift_transfer_cancel")]])
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WAIT_GIFT_TRANSFER_USER
+
+async def gift_transfer_user_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender = update.effective_user
+    target_str = update.message.text.strip()
+    target = get_user_by_target(target_str)
+    if not target:
+        await update.message.reply_text("❌ Игрок не найден в боте. Попробуйте снова (ID или @username):")
+        return WAIT_GIFT_TRANSFER_USER
+    if target["user_id"] == sender.id:
+        await update.message.reply_text("❌ Нельзя передать подарок самому себе! Укажите другого игрока:")
+        return WAIT_GIFT_TRANSFER_USER
+
+    item_id = context.user_data.get("transfer_item_id")
+    item = get_collection_item(item_id) if item_id else None
+    if not item or item["user_id"] != sender.id:
+        await update.message.reply_text("❌ Подарок больше не найден в вашей коллекции.", reply_markup=quick_nav_keyboard())
+        return ConversationHandler.END
+
+    ok, err = transfer_collection_item(item_id, sender.id, target["user_id"])
+    if not ok:
+        await update.message.reply_text(f"❌ {err}", reply_markup=quick_nav_keyboard())
+        return ConversationHandler.END
+
+    rec_name = normalize_telegram_name(target["first_name"] or target["username"] or "Игрок")
+    if item["is_upgraded"]:
+        gift_desc = f"✨ Plush Pepe #{item['id']} ({item['model_name']} | Фон: {item['bg_name']} {item['bg_rarity']:.2f}%)"
+    else:
+        g = GIFTS_BY_KEY.get(item["gift_key"])
+        gift_desc = g.name if g else item["gift_key"]
+
+    try:
+        await context.bot.send_message(
+            chat_id=target["user_id"],
+            text=(
+                f"🎁 <b>Вам бесплатно подарили NFT-подарок!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"От игрока: <b>{clean_html(sender.first_name)}</b>\n"
+                f"Предмет: <b>{clean_html(gift_desc)}</b>\n\n"
+                f"Подарок уже добавлен в вашу коллекцию!"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=quick_nav_keyboard(),
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>Подарок бесплатно передан!</b>\n"
+        f"• Предмет: <b>{clean_html(gift_desc)}</b>\n"
+        f"• Получатель: <b>{clean_html(rec_name)}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=quick_nav_keyboard(),
+    )
+    return ConversationHandler.END
+
+async def gift_transfer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer("Отменено.")
+        await show_collection_page(query, query.from_user.id, 1)
+    else:
+        await update.message.reply_text("Передача подарка отменена.", reply_markup=back_to_main_keyboard())
+    return ConversationHandler.END
+
+# ---------------------------------------------------------------------------
+# НАСТРОЙКИ
+# ---------------------------------------------------------------------------
 
 async def show_settings_page(query, user_id: int) -> None:
     db_user = get_or_create_user(user_id, "", "")
@@ -3433,8 +4847,12 @@ async def show_collection_page(query, user_id: int, page: int = 1) -> None:
         g = GIFTS_BY_KEY.get(item["gift_key"])
         if not g: continue
         fav_star = "⭐ " if item["is_favorite"] else ""
-        btn_text = f"{fav_star}{g.name} ({g.stars:,}⭐)"
-        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"view_item:{item['id']}:{page}")])
+        if item["is_upgraded"]:
+            market_tag = "🛒 " if item["is_listed"] else "✨ "
+            btn_text = f"{fav_star}{market_tag}Plush Pepe • {item['model_name']} [{item['bg_name']}] ({item['estimated_stars']:,}⭐)"
+        else:
+            btn_text = f"{fav_star}{g.name} ({g.stars:,}⭐)"
+        buttons.append([InlineKeyboardButton(btn_text[:60], callback_data=f"view_item:{item['id']}:{page}")])
 
     nav_row = []
     if page > 1:
@@ -3444,6 +4862,7 @@ async def show_collection_page(query, user_id: int, page: int = 1) -> None:
         nav_row.append(InlineKeyboardButton("▶️", callback_data=f"nav_collection_page:{page+1}"))
     buttons.append(nav_row)
 
+    buttons.append([InlineKeyboardButton("✨ Улучшения подарков", callback_data="nav_shop")])
     buttons.append([InlineKeyboardButton("🔥 Продать всё (кроме избранных)", callback_data="sell_all_confirm")])
     buttons.append([
         InlineKeyboardButton("👤 Профиль", callback_data="nav_profile"),
@@ -3605,8 +5024,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Защита приватных разделов в группах
-    if query.message.chat.type != "private" and data in (
-        "nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "nav_clans_hub", "admin_panel", "nav_market"
+    if query.message.chat.type != "private" and (
+        data in ("nav_cases_hub", "nav_top_page:1", "nav_settings", "nav_shop", "shop_slots_menu", "nav_clans_hub", "admin_panel", "nav_market", "market_create_offer", "market_my_offers", "market_history")
+        or data.startswith(("upgrade_", "market_"))
     ):
         await query.answer("⚠️ Откройте личные сообщения с ботом для этого меню!", show_alert=True)
         return
@@ -3719,7 +5139,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await execute_admin_give_nft(query, gift_key, int(target_id), context)
         return
 
-    # Маркет фильтры
+    # Улучшения Plush Pepe и слоты
+    if data == "shop_slots_menu":
+        await show_slots_shop_page(query, user.id)
+        return
+
+    if data.startswith("upgrade_page:"):
+        page = int(data.split(":")[1])
+        await show_shop_page(query, user.id, page)
+        return
+
+    if data.startswith("upgrade_item:"):
+        item_id = int(data.split(":")[1])
+        await show_upgrade_item_preview(query, item_id, user.id)
+        return
+
+    if data.startswith("upgrade_do:"):
+        item_id = int(data.split(":")[1])
+        await execute_gift_upgrade(query, item_id, user.id, context)
+        return
+
+    # Маркет фильтры и торговля
     if data == "market_filter_price_menu":
         await show_market_filter_price_menu(query)
         return
@@ -3733,16 +5173,101 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await show_market_view_page(query, ftype, fkey, int(page))
         return
 
+    if data.startswith("market_lot:"):
+        listing_id = int(data.split(":")[1])
+        await show_market_lot_detail(query, listing_id, user.id)
+        return
+
+    if data.startswith("market_lot_item:"):
+        item_id = int(data.split(":")[1])
+        lot = get_market_listing_by_item(item_id)
+        if not lot:
+            await query.answer("❌ Активный лот не найден.", show_alert=True)
+            return
+        await show_market_lot_detail(query, lot["id"], user.id)
+        return
+
+    if data.startswith("market_buy:"):
+        listing_id = int(data.split(":")[1])
+        ok, deal, err = buy_market_listing(listing_id, user.id)
+        if not ok:
+            await query.answer(f"❌ {err}", show_alert=True)
+            return
+        lot = deal["lot"]
+        price = deal["price"]
+        fee = deal["fee"]
+        payout = deal["payout"]
+        try:
+            await context.bot.send_message(
+                chat_id=lot["seller_id"],
+                text=(
+                    f"🎉 <b>Ваш лот на NFT Маркете продан!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"• Подарок: <b>Plush Pepe #{lot['collection_id']}</b> ({clean_html(lot['model_name'])} | {clean_html(lot['bg_name'])})\n"
+                    f"• Цена продажи: <b>{price:,} ⭐</b>\n"
+                    f"• Комиссия рынка 15%: <b>-{fee:,} ⭐</b>\n"
+                    f"• Зачислено на баланс: <b>+{payout:,} ⭐</b>"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=quick_nav_keyboard(),
+            )
+        except Exception:
+            pass
+
+        msg_txt = (
+            f"✅ <b>Поздравляем с покупкой!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Вы приобрели улучшенный <b>Plush Pepe #{lot['collection_id']}</b>!\n"
+            f"• Модель: <b>{clean_html(lot['model_name'])}</b>\n"
+            f"• Фон: <b>{clean_html(lot['bg_name'])}</b> ({lot['bg_rarity']:.2f}%)\n"
+            f"• Списано с баланса: <b>{price:,} ⭐</b>\n\n"
+            f"Подарок уже добавлен в вашу коллекцию!"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗂 Открыть коллекцию", callback_data="nav_collection_page:1")],
+            [InlineKeyboardButton("🛒 Вернуться в маркет", callback_data="nav_market")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")],
+        ])
+        if query.message.photo:
+            await query.edit_message_caption(caption=msg_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query.edit_message_text(msg_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data.startswith("market_cancel:"):
+        listing_id = int(data.split(":")[1])
+        ok, err = cancel_market_listing(listing_id, user.id)
+        if ok:
+            await query.answer("✅ Лот снят с продажи и возвращён в коллекцию!", show_alert=True)
+            await show_market_my_offers(query, user.id)
+        else:
+            await query.answer(f"❌ {err}", show_alert=True)
+        return
+
+    if data.startswith("market_cancel_item:"):
+        item_id = int(data.split(":")[1])
+        lot = get_market_listing_by_item(item_id)
+        if not lot:
+            await query.answer("❌ Активный лот не найден.", show_alert=True)
+            return
+        ok, err = cancel_market_listing(lot["id"], user.id)
+        if ok:
+            await query.answer("✅ Подарок снят с маркета!", show_alert=True)
+            await show_collection_page(query, user.id, 1)
+        else:
+            await query.answer(f"❌ {err}", show_alert=True)
+        return
+
     if data == "market_create_offer":
-        await query.answer("⚠️ Создание офферов станет доступно после запуска улучшений!", show_alert=True)
+        await show_market_create_offer_list(query, user.id)
         return
 
     if data == "market_my_offers":
-        await query.answer("ℹ️ У вас пока нет активных офферов на маркете.", show_alert=True)
+        await show_market_my_offers(query, user.id)
         return
 
     if data == "market_history":
-        await query.answer("📊 История сделок пока пуста.", show_alert=True)
+        await show_market_history_page(query, user.id)
         return
 
     if data == "nav_main":
@@ -3934,7 +5459,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         slots, cost = int(slots_str), int(cost_str)
         if upgrade_inventory_capacity(user.id, cost, slots):
             await query.answer(f"✅ Куплено +{slots} слотов!", show_alert=True)
-            await show_shop_page(query, user.id)
+            await show_slots_shop_page(query, user.id)
         else:
             await query.answer("❌ Недостаточно Stars!", show_alert=True)
         return
@@ -3946,12 +5471,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 InlineKeyboardButton("❌ Отмена", callback_data="nav_collection_page:1"),
             ]
         ])
-        await query.edit_message_text("⚠️ <b>Продать все обычные предметы из коллекции?</b>\nИзбранные (⭐) затронуты не будут.", parse_mode=ParseMode.HTML, reply_markup=kb)
+        await query.edit_message_text(
+            "⚠️ <b>Продать все обычные предметы из коллекции?</b>\n"
+            "Избранные (⭐), улучшенные (✨) и выставленные на маркет предметы затронуты не будут.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
+        )
         return
 
     if data == "sell_all_do":
         count, stars = sell_all_non_favorites(user.id)
-        await query.answer(f"💰 Продано {count} предметов за {stars:,} Stars!", show_alert=True)
+        await query.answer(f"💰 Продано {count} обычных предметов за {stars:,} Stars!", show_alert=True)
         await show_collection_page(query, user.id, 1)
         return
 
@@ -4110,16 +5640,67 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
 
             g = GIFTS_BY_KEY.get(item["gift_key"])
-            fav_text = "❌ Убрать из Избранного" if item["is_favorite"] else "⭐ В избранное"
+            if not g:
+                await query.answer("Ошибка данных предмета.", show_alert=True)
+                return
 
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(fav_text, callback_data=f"toggle_fav:{item_id}:{page}")],
-                [InlineKeyboardButton(f"💰 Продать за {g.stars:,} Stars", callback_data=f"sell_item:{item_id}:{page}")],
-                [
+            if item["is_upgraded"]:
+                bg_obj = next((b for b in PLUSHPEPE_BACKDROPS if b.name == item["bg_name"]), None)
+                rarity_lbl = bg_obj.rarity_label if bg_obj else "Редкий"
+                est_val = item["estimated_stars"] or g.stars
+
+                btns = []
+                if item["is_listed"]:
+                    btns.append([InlineKeyboardButton("🔍 Открыть лот на маркете", callback_data=f"market_lot_item:{item_id}")])
+                    btns.append([InlineKeyboardButton("❌ Снять с маркета", callback_data=f"market_cancel_item:{item_id}")])
+                else:
+                    fav_text = "❌ Убрать из Избранного" if item["is_favorite"] else "⭐ В избранное"
+                    btns.append([InlineKeyboardButton(fav_text, callback_data=f"toggle_fav:{item_id}:{page}")])
+                    btns.append([InlineKeyboardButton("🛒 Выставить на маркет", callback_data=f"market_sell_start:{item_id}")])
+                    btns.append([InlineKeyboardButton("🎁 Передать бесплатно", callback_data=f"gift_transfer_start:{item_id}")])
+                    btns.append([InlineKeyboardButton(f"💰 Быстрая продажа ({est_val:,} ⭐)", callback_data=f"sell_item:{item_id}:{page}")])
+                btns.append([
                     InlineKeyboardButton("🗂 Назад в коллекцию", callback_data=f"nav_collection_page:{page}"),
-                    InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")
-                ]
+                    InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main"),
+                ])
+                kb = InlineKeyboardMarkup(btns)
+
+                status_str = "🛒 Выставлен на маркете" if item["is_listed"] else "🎒 В коллекции"
+                cap = (
+                    f"✨ <b>Улучшенный Plush Pepe #{item_id}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🧸 Модель: <b>{clean_html(item['model_name'])}</b> (редкость: <b>{item['model_rarity']:.1f}%</b>)\n"
+                    f"🎨 Фон: <b>{clean_html(item['bg_name'])}</b> — {clean_html(item['bg_palette'])}\n"
+                    f"💎 Шанс фона: <b>{item['bg_rarity']:.2f}%</b> ({rarity_lbl})\n"
+                    f"💰 Оценочная стоимость: <b>{fmt_stars_rub(est_val)}</b>\n"
+                    f"⭐ В Избранном: <b>{'Да' if item['is_favorite'] else 'Нет'}</b>\n"
+                    f"📌 Статус: <b>{status_str}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━"
+                )
+                try:
+                    card_io = await generate_upgraded_gift_image(
+                        item["model_file"], item["model_name"], item["bg_name"],
+                        item["bg_center_hex"], item["bg_edge_hex"], item["bg_rarity"], item_id
+                    )
+                    await query.message.reply_photo(photo=InputFile(card_io, filename=f"pepe_{item_id}.png"), caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                    await query.message.delete()
+                    return
+                except Exception as e:
+                    log.warning("Ошибка рендера улучшенного предмета: %s", e)
+
+                await query.edit_message_text(cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                return
+
+            fav_text = "❌ Убрать из Избранного" if item["is_favorite"] else "⭐ В избранное"
+            btns = [[InlineKeyboardButton(fav_text, callback_data=f"toggle_fav:{item_id}:{page}")]]
+            if g.key == "pepe_heart":
+                btns.append([InlineKeyboardButton(f"✨ Улучшить ({UPGRADE_COST_STARS:,} ⭐)", callback_data=f"upgrade_item:{item_id}")])
+            btns.append([InlineKeyboardButton(f"💰 Продать за {g.stars:,} Stars", callback_data=f"sell_item:{item_id}:{page}")])
+            btns.append([
+                InlineKeyboardButton("🗂 Назад в коллекцию", callback_data=f"nav_collection_page:{page}"),
+                InlineKeyboardButton("🏠 Главное меню", callback_data="nav_main")
             ])
+            kb = InlineKeyboardMarkup(btns)
 
             cap = (
                 f"<b>{g.name}</b>\n"
@@ -4146,6 +5727,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if action == "toggle_fav":
             item_id = int(rest[0])
             page = int(rest[1]) if len(rest) > 1 else 1
+            item = get_collection_item(item_id)
+            if item and item["is_listed"]:
+                await query.answer("❌ Нельзя добавить в избранное предмет, который на маркете!", show_alert=True)
+                return
             if toggle_favorite(item_id, user.id):
                 await query.answer("Избранное обновлено!")
                 await show_collection_page(query, user.id, page)
@@ -4160,12 +5745,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not item or item["user_id"] != user.id:
                 await query.answer("Ошибка продажи.", show_alert=True)
                 return
+            if item["is_listed"]:
+                await query.answer("❌ Сначала снимите предмет с маркета!", show_alert=True)
+                return
 
             g = GIFTS_BY_KEY.get(item["gift_key"])
+            sell_price = item["estimated_stars"] if (item["is_upgraded"] and item["estimated_stars"]) else g.stars
             remove_from_collection(item_id, user.id)
-            add_user_stars(user.id, g.stars)
+            add_user_stars(user.id, sell_price)
 
-            await query.answer(f"💰 Продано за {g.stars:,} Stars!", show_alert=True)
+            await query.answer(f"💰 Продано за {sell_price:,} Stars!", show_alert=True)
             await show_collection_page(query, user.id, page)
             return
 
@@ -4329,16 +5918,26 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not item or item["user_id"] != sender.id:
         await update.message.reply_text("❌ Предмет не найден в вашей коллекции.")
         return
+    if item["is_listed"]:
+        await update.message.reply_text("❌ Предмет выставлен на маркет. Сначала снимите его с продажи.")
+        return
 
     target_user = get_user_by_target(target_str)
     if not target_user or target_user["user_id"] == sender.id:
         await update.message.reply_text("❌ Некорректный получатель.")
         return
 
-    g = GIFTS_BY_KEY.get(item["gift_key"])
-    remove_from_collection(item_id, sender.id)
-    add_to_collection(target_user["user_id"], item["gift_key"])
+    ok, err = transfer_collection_item(item_id, sender.id, target_user["user_id"])
+    if not ok:
+        await update.message.reply_text(f"❌ {err}")
+        return
 
+    g = GIFTS_BY_KEY.get(item["gift_key"])
+    gift_label = (
+        f"✨ Plush Pepe #{item['id']} ({item['model_name']} | {item['bg_name']})"
+        if item["is_upgraded"]
+        else (g.name if g else item["gift_key"])
+    )
     receiver_name = normalize_telegram_name(target_user["first_name"] or target_user["username"] or "Игрок")
 
     try:
@@ -4347,7 +5946,7 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text=(
                 f"🎁 <b>Вам подарен NFT!</b>\n\n"
                 f"От игрока: <b>{clean_html(sender.first_name)}</b>\n"
-                f"Предмет: <b>{g.name if g else item['gift_key']}</b>!\n"
+                f"Предмет: <b>{clean_html(gift_label)}</b>!\n"
                 f"Предмет уже в вашей коллекции."
             ),
             parse_mode=ParseMode.HTML,
@@ -4357,7 +5956,7 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         pass
 
     await update.message.reply_text(
-        f"🎁 <b>Подарок передан!</b>\nПредмет <b>{g.name if g else item['gift_key']}</b> отправлен игроку <b>{clean_html(receiver_name)}</b>!",
+        f"🎁 <b>Подарок бесплатно передан!</b>\nПредмет <b>{clean_html(gift_label)}</b> отправлен игроку <b>{clean_html(receiver_name)}</b>!",
         parse_mode=ParseMode.HTML,
         reply_markup=quick_nav_keyboard()
     )
@@ -4516,6 +6115,34 @@ def main() -> None:
         allow_reentry=True
     )
 
+    # 9. FSM Выставления лота на NFT Маркет
+    market_offer_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(market_sell_start, pattern="^market_sell_start:")],
+        states={
+            WAIT_MARKET_OFFER_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, market_offer_price_received),
+                CallbackQueryHandler(market_offer_cancel, pattern="^market_offer_cancel$"),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", market_offer_cancel)],
+        per_message=False,
+        allow_reentry=True,
+    )
+
+    # 10. FSM Бесплатной передачи подарка
+    gift_transfer_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(gift_transfer_start, pattern="^gift_transfer_start:")],
+        states={
+            WAIT_GIFT_TRANSFER_USER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, gift_transfer_user_received),
+                CallbackQueryHandler(gift_transfer_cancel, pattern="^gift_transfer_cancel$"),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", gift_transfer_cancel)],
+        per_message=False,
+        allow_reentry=True,
+    )
+
     app.add_handler(clan_conv)
     app.add_handler(admin_give_stars_conv)
     app.add_handler(admin_give_nft_conv)
@@ -4524,6 +6151,8 @@ def main() -> None:
     app.add_handler(clan_avatar_conv)
     app.add_handler(clan_donate_conv)
     app.add_handler(bg_conv)
+    app.add_handler(market_offer_conv)
+    app.add_handler(gift_transfer_conv)
 
     # Команды
     app.add_handler(CommandHandler("start", cmd_start))
