@@ -21,6 +21,7 @@ New NFT Gift Telegram Bot v12.0 (Ultimate Clans & Clean Heraldry Edition)
 
 import asyncio
 import atexit
+import base64
 import datetime
 import html
 import io
@@ -36,6 +37,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -61,15 +63,15 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# Попытка импорта Firebase Admin SDK
+# Попытка импорта Firebase Admin SDK (Cloud Firestore)
 try:
     import firebase_admin
-    from firebase_admin import credentials as fb_credentials, storage as fb_storage
+    from firebase_admin import credentials as fb_credentials, firestore as fb_firestore
     FIREBASE_ADMIN_AVAILABLE = True
 except ImportError:
     firebase_admin = None
     fb_credentials = None
-    fb_storage = None
+    fb_firestore = None
     FIREBASE_ADMIN_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
@@ -114,8 +116,8 @@ MARKET_MAX_PRICE = 100_000_000_000      # Максимальная цена ло
 FIREBASE_SERVICE_ACCOUNT_CONFIG = {
     "type": "service_account",
     "project_id": "proar-5a642",
-    "private_key_id": "77fd7fd5edb3898bf3d55a10fface27e3426abe3",
-    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCYcCxSO9yIM4ca\n2YVt5xdwOAYmUkPbDvxMx7bfi4y6TqImYCnVQ1gEnpL0pRLVfrzW/+0ct8BYgEyE\n4IIqoLwW4t5xGdkWgqgbNkY8t3pqGS0wAXjQLN9f5SPY49XoaF0Pan552g3h4ZYs\nTfdYGACZ2A8+CBKTvjBF1RHGc0BWhK7aY5MMCYyFx6WBVMM4M04K8wlXQUCESGPa\nkpQH6XmIrKuNTaETu7MjD+4rAvjyyTiL/g85TBESA1YHR1NDP6bL0KdHjv3sUpj7\n+WC9IoXzUJMZnmewBbWIVTdn4bdWbk1FlKaUk8Y0I1NR6f5cIrFOQB2vqvoTUqWY\nAfNN/7gHAgMBAAECggEADsnjIt831+bX1pz/utfOiE6HGjSk7J2ZkIFXlnxdXL3A\nMWTm6g+sfFY9/4n8N8Yh3+HYSQ7ylCNuSP3W4vfRB49e8S4Gx45JbMppKf7K23wx\nzBR4egnAafc68RG5cOCfFp3IQ14KNr3B6e5ubpd1h3dUkzoJQ1gSKtQu80e/GCWE\n0dq3d0F001wVtIIgZ79D6aTNo7j1i+U0he1BztfamRe0DZXEbJxmRSssc2ICLx7n\nBGCceyocw1k/1cpaubtiteIitwhWuXdzFwoubsPSF3dvL5kMOOudW/p6XuDtp054\nkHHXQGUlK/kr03ZgMabjuo1XcUzAnowzVA2P3gp+MQKBgQDKVkB5aiJvAOLEqsK4\nEcZ5YqOHYTU2zkO9lLiJDcN2+C69+f9D1i8UIJQotQoluDKx4mQHSsvFkBbzfU+u\n4+QKHHijVgDYtV/4IoPMsPAjGKl3o+W9+scRKhIlTymZs+Q/+AqzWLrD2fr3QJVW\n2hven8QLJua81gD4tumc9Wr5FQKBgQDA3gaKNlwzTzm2YDNOJ6V0tiH1GH01ucXS\nCOaJFKfsyJutbEHNKOad0bSjxwuvq5sw7b5lMVDd2XUTGJNdBVKTNkaEQkhq4S2N\ngL8KoML7FOTYqQIxUbfTfmY/YSR8U7Jm5OqEGFGT5xGUAmy/BWfN31KFGbW/Ujkz\nHCrIEXW7qwKBgQCFhcWmWdO/TOZYwhcdQR2onN8tR4jGUfeB89KTHvIOYFj4JTG+\nomkO7zDWbCH2IkfR+4PnDATMqvl6VQdwchLaWU+C+g408/wQ0zYGrfzKLEwpF49U\nf1k+inTPCh55v6ywSg9FqxgUhpSG9aeXWPdrQiMs+M7rbo3Vk182pP2iwQKBgEbO\n/P2vWYho9NpVVWDDQ4am+66dcBLSgqNLK0B2ufQ/7o/sJ/hnpMuaW0Sp5kt3qIF9\nN6K1SWg51zbMlgXX12o+ygLyxt2ekHfcJceEIDHIiQBWhHyQ8PmP9YAdbSTMIbqP\nHt6igwjXE+gQP9ad6G94JzbAqq50RJXUKIzNhDkDAoGBALy11Sh60zRtyiHc/ey7\nP+7Idr+kp5Jb+dpj3Jihl/ZrJNN2ciqdYX8+/BM02yzGS8TO5NzhigtiZsv2Sx75\nXJWnqbguNw6r9OnxkgCkKfDV0ZVjZmQiU6WkdGYNL0yJXqU4B13B0poxw/e1qnqo\nJOjwNN4j2k7xeDxglv04laVH\n-----END PRIVATE KEY-----\n",
+    "private_key_id": "4a144f7704aac1ceaa190705283f7b484fbff96a",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC+/pKlE0760J18\nCnIZJPrKb1aPkY+pUio7Pm6PnBmXqMT21Mr6KC7z6VIXedW8SA9aDjHLlPd1adYa\nFnBjoeMZQVkd0YJrfBWdUgqt2/17zPSbU0VRTdKPWlxgJVJFqJ9Ucgmm1dE+lTl4\nHsq0+I0U6GekkXyXaLtR/u4bTzOUrL0bTMV67lAXr2sKw1SHqeGeQ0ugABYyr0UK\nWgXdvxWiaoQ1TXQJ7R4TzvB4SAFv1X1XMsWQntX2Ntu3WKHrhwtwUAyFJ1FrdcQR\nleeFRkiepSnZ5iC7aT7O81xy5gPHMFajFgMLtzMTa4uVCXmN5W05+ubXMSucXN/9\nY1YatGO7AgMBAAECggEAFoBVdH8+2cvEEf4FDTNPHJRbZVSn0THt6cbkLaUdWsG2\nWsIdG7WqOnAtjLh81s7CiECN20c0lC+g2rf0C7jh0XLideHd9J3MyhkFSxBU38X4\nt2frDbYWbW8e3PDorW49PyykOHSOT0ozWBSAmyuBK4pp03iUbh4Xm4RmNu9wyz4O\nYag5X2AH8UTh39P332nYvILhOMKFuQITUsiZ/PFBVrqn6ss1EJyqpj/kKgDqbM0O\nsSRsYTPkWLqpa4rgZIb2Y8WNRwOFYx7npzXWDS6pDhApdolQWMW4tPHCJb82J9yk\nQ3hEmrrjT8pBktHTEriciTNXV77GS8OTo/PSgJjgsQKBgQDrRfCaK4EmmOvk3Sx0\nAzEshNrUP1riPUyP4gDCM7E6LQdY0ST3+83QuUWqMmshspZsuCZCR1zcprr3ZYj6\nWOGjHSA38b6nlkblRAuyiWcGj7ZLvf7H22S3CkYheldguEdFWMSxG6jVd56GpjZL\nmXxXuWDXCB1X1g40W7/c4vOKMwKBgQDP0gY6HHwjYmvBLDw0UvH9AOKXBUZknUvA\nomZNZOpFbTspWpJj/VqksLEMYqxJJxC6rGg0t9M2qYlINnsCNXcOx01e/BcNab81\nEmOrrtOLxiXSx4+4B+cJ2gOQ/q3fmWk+6OMBqpPJC7fBBrepzwVGYYnUjkDAsR/o\nF0uHISlIWQKBgFaIGr4ZUh8ID3rVfgwNQIDHPFTkGGEteoNQ9EZ5DK4A8brQ8W/j\nxQcHnX/Dm3OBY6II+MlXxefByvJC/eZV2mdLxxXMa/rnYpvgMw0vTB01ri6dap/H\nKXvI45JclNaV8GCpDW62ZZpdrIiJiV60zO7W168+5MvxhrfrJt3u+vPRAoGAcvz8\noQ69yT5d7Oay8Sir6JeiyHkMuAMotQ+ml1AtJ/kGcR1CPr0ieFmjvPyj414QLZnT\nlsfXwDkSUriCW3iFxdGVB+doQe2u9IiWSZpURtR+fSAab3M/7P2KV6HzRvM1fq+R\nW4ysdONc6xryaKy5eHXjs456WaQnyV2KVtyMYRECgYBM6+chPRK3ZFTSJP4i6Hl9\nHGv5ThpKfpdlHApHEg8eLBU1soRjOCBphuJFvtMjmg2LTeJZMfQqi5PcAIOCP4gV\nbapVqGmG9cHNlVacFJdJbbWHPUs+Hw5hJGjd6ckHRO4REYY9725bhKeORKsRYmoo\nkz/3vSS/ygQ0Ma2sfXTVfQ==\n-----END PRIVATE KEY-----\n",
     "client_email": "firebase-adminsdk-fbsvc@proar-5a642.iam.gserviceaccount.com",
     "client_id": "103737744652283306114",
     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -127,66 +129,151 @@ FIREBASE_SERVICE_ACCOUNT_CONFIG = {
 
 class FirebaseStorageManager:
     """
-    Управляет безопасным хранением базы SQLite (base.db) в Firebase Storage.
-    Гарантирует сохранение данных при перезапусках контейнера bot host.ru.
+    Управляет безопасным хранением базы SQLite (base.db) в Cloud Firestore (100% бесплатно).
+    Коллекция: telegram_bot_data, документ: sqlite_database.
+    Гарантирует сохранение данных при перезапусках контейнера bot host.ru и защищает от затирания.
     """
+    SQLITE_HEADER = b"SQLite format 3\x00"
+
     def __init__(self):
         self.app = None
-        self.bucket = None
-        self.bucket_name = os.environ.get("FIREBASE_STORAGE_BUCKET", "proar-5a642.firebasestorage.app")
+        self.db = None
+        self.project_id = "proar-5a642"
+        self.collection_name = os.environ.get("FIREBASE_COLLECTION", "telegram_bot_data")
+        self.document_name = os.environ.get("FIREBASE_DOCUMENT", "sqlite_database")
         self.initialized = False
         self.last_sync_ts: float = 0.0
         self.last_sync_size: int = 0
         self.last_sync_status: str = "Ожидает первой синхронизации"
+        self.last_error: str = ""
         self._lock = threading.Lock()
         self._sync_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._dirty = False
+        self._startup_download_error = False
+        self._cloud_doc_missing = False
+        self.active_key_id: str = ""
+        self.key_source: str = "embedded"
 
-    def init_app(self) -> bool:
+    def _load_credentials_dict(self) -> dict:
+        cred_dict = None
+        source_label = "встроенный конфиг"
+        # 1. Из переменных окружения (если настроены на хостинге)
+        for env_key in ("FIREBASE_CREDENTIALS_JSON", "FIREBASE_SERVICE_ACCOUNT_JSON"):
+            raw_env = os.environ.get(env_key, "").strip()
+            if raw_env:
+                try:
+                    cred_dict = json.loads(raw_env)
+                    source_label = f"env:{env_key}"
+                    break
+                except Exception as e:
+                    log.warning(f"[Firebase] Не удалось распарсить {env_key}: {e}")
+
+        # 2. Из файла JSON в папке бота (включая любые скачанные .json ключи Firebase)
+        if cred_dict is None:
+            candidates = [
+                BASE_DIR / "firebase-service-account.json",
+                BASE_DIR / "firebase_credentials.json",
+                BASE_DIR / "serviceAccountKey.json",
+            ]
+            env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            if env_path:
+                candidates.insert(0, Path(env_path))
+            candidates.extend(sorted(BASE_DIR.glob("*firebase-adminsdk*.json")))
+            candidates.extend(sorted(BASE_DIR.glob("*.json")))
+
+            seen_paths = set()
+            for candidate in candidates:
+                resolved = str(candidate)
+                if resolved in seen_paths:
+                    continue
+                seen_paths.add(resolved)
+                if candidate.exists() and candidate.is_file():
+                    try:
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            loaded = json.load(f)
+                        if (
+                            isinstance(loaded, dict)
+                            and loaded.get("type") == "service_account"
+                            and "private_key" in loaded
+                            and "client_email" in loaded
+                        ):
+                            cred_dict = loaded
+                            source_label = f"файл {candidate.name}"
+                            log.info(f"[Firebase] Найден файл ключа: {candidate.name}")
+                            break
+                    except Exception as e:
+                        log.warning(f"[Firebase] Ошибка чтения {candidate}: {e}")
+
+        # 3. Встроенный конфиг как запасной вариант
+        if cred_dict is None:
+            cred_dict = dict(FIREBASE_SERVICE_ACCOUNT_CONFIG)
+        else:
+            cred_dict = dict(cred_dict)
+
+        if isinstance(cred_dict.get("private_key"), str):
+            cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+
+        if cred_dict.get("project_id"):
+            self.project_id = cred_dict["project_id"]
+
+        self.active_key_id = str(cred_dict.get("private_key_id", ""))[:12]
+        self.key_source = source_label
+        return cred_dict
+
+    def _format_error(self, err: Exception) -> str:
+        msg = str(err)
+        if "Invalid JWT Signature" in msg or "invalid_grant" in msg:
+            kid = f" (ключ {self.active_key_id}..., {self.key_source})" if self.active_key_id else ""
+            return (
+                f"Ключ Firebase отозван/недействителен{kid}. "
+                "Загрузите новый .json ключ через админку («🔑 Загрузить ключ Firebase») или положите .json в папку с ботом."
+            )
+        return msg
+
+    def init_app(self, force_reinit: bool = False) -> bool:
         if not FIREBASE_ADMIN_AVAILABLE:
             log.warning("[Firebase] Библиотека firebase-admin не установлена. На bot host.ru выполните: pip install firebase-admin")
             self.last_sync_status = "Ошибка: firebase-admin не установлен"
             return False
 
-        if self.initialized and self.bucket:
+        if self.initialized and self.db is not None and not force_reinit:
             return True
 
         try:
-            # 1. Поиск конфига: внешний файл или встроенный
-            cred_dict = FIREBASE_SERVICE_ACCOUNT_CONFIG
-            for candidate in [BASE_DIR / "firebase-service-account.json", BASE_DIR / "firebase_credentials.json"]:
-                if candidate.exists():
-                    try:
-                        with open(candidate, "r", encoding="utf-8") as f:
-                            cred_dict = json.load(f)
-                            break
-                    except Exception:
-                        pass
+            if force_reinit:
+                try:
+                    existing_app = firebase_admin.get_app()
+                    firebase_admin.delete_app(existing_app)
+                except ValueError:
+                    pass
+                self.app = None
+                self.db = None
+                self.initialized = False
 
+            cred_dict = self._load_credentials_dict()
             cred = fb_credentials.Certificate(cred_dict)
 
             try:
                 self.app = firebase_admin.get_app()
             except ValueError:
-                self.app = firebase_admin.initialize_app(cred, {
-                    "storageBucket": self.bucket_name
-                })
+                self.app = firebase_admin.initialize_app(cred)
 
-            try:
-                self.bucket = fb_storage.bucket(self.bucket_name, app=self.app)
-            except Exception:
-                alt_bucket = "proar-5a642.appspot.com"
-                self.bucket = fb_storage.bucket(alt_bucket, app=self.app)
-                self.bucket_name = alt_bucket
-
+            self.db = fb_firestore.client(app=self.app)
             self.initialized = True
-            log.info(f"[Firebase] ✅ Подключено к проекту proar-5a642, бакет: {self.bucket_name}")
+            self.last_error = ""
+            log.info(f"[Firestore] ✅ Инициализирован клиент {self.project_id} ({self.collection_name}/{self.document_name}, {self.key_source}, kid={self.active_key_id})")
             return True
         except Exception as e:
-            log.error(f"[Firebase] ❌ Ошибка подключения к Firebase: {e}")
-            self.last_sync_status = f"Ошибка инициализации: {e}"
+            err_txt = self._format_error(e)
+            log.error(f"[Firestore] ❌ Ошибка подключения к Firebase Firestore: {err_txt}")
+            self.last_error = err_txt
+            self.last_sync_status = f"Ошибка инициализации: {err_txt}"
+            self.initialized = False
             return False
+
+    def reinit(self) -> bool:
+        return self.init_app(force_reinit=True)
 
     @staticmethod
     def is_valid_sqlite(path: Path) -> bool:
@@ -199,36 +286,140 @@ class FirebaseStorageManager:
         except Exception:
             return False
 
+    @classmethod
+    def _decode_sqlite_payload(cls, raw_val, compression_hint: str = "") -> Optional[bytes]:
+        raw_bytes: Optional[bytes] = None
+        if isinstance(raw_val, (bytes, bytearray)):
+            raw_bytes = bytes(raw_val)
+        elif isinstance(raw_val, str) and len(raw_val) > 60:
+            try:
+                raw_bytes = base64.b64decode(raw_val)
+            except Exception:
+                return None
+        else:
+            return None
+
+        if raw_bytes.startswith(cls.SQLITE_HEADER):
+            return raw_bytes
+
+        try:
+            decomp = zlib.decompress(raw_bytes)
+            if decomp.startswith(cls.SQLITE_HEADER):
+                return decomp
+        except Exception:
+            pass
+
+        if compression_hint == "zlib":
+            try:
+                decomp = zlib.decompress(raw_bytes)
+                if decomp.startswith(cls.SQLITE_HEADER):
+                    return decomp
+            except Exception:
+                pass
+        return None
+
+    def _extract_sqlite_from_doc(self, doc_ref, doc_dict: dict) -> Optional[bytes]:
+        if not isinstance(doc_dict, dict):
+            return None
+
+        compression_hint = str(doc_dict.get("compression", "")).lower()
+
+        # 1. Поддержка чанкованного хранения (если база выросла > 900 КБ)
+        if doc_dict.get("chunked") or (isinstance(doc_dict.get("chunk_count"), int) and doc_dict.get("chunk_count", 0) > 0):
+            chunk_count = int(doc_dict.get("chunk_count", 0))
+            parts: list[bytes] = []
+            # Сначала пробуем подколлекцию chunks
+            chunk_docs = list(doc_ref.collection("chunks").stream())
+            if chunk_docs:
+                indexed = []
+                for cd in chunk_docs:
+                    cdata = cd.to_dict() or {}
+                    idx = cdata.get("index")
+                    if idx is None:
+                        m = re.search(r"(\d+)$", cd.id)
+                        idx = int(m.group(1)) if m else 0
+                    val = cdata.get("data") or cdata.get("chunk") or cdata.get("content") or b""
+                    if isinstance(val, str):
+                        val = base64.b64decode(val)
+                    indexed.append((int(idx), bytes(val)))
+                indexed.sort(key=lambda x: x[0])
+                parts = [p for _, p in indexed]
+            elif chunk_count > 0:
+                for idx in range(chunk_count):
+                    val = doc_dict.get(f"chunk_{idx}", b"")
+                    if isinstance(val, str):
+                        val = base64.b64decode(val)
+                    parts.append(bytes(val))
+
+            if parts:
+                joined = b"".join(parts)
+                res = self._decode_sqlite_payload(joined, compression_hint)
+                if res:
+                    return res
+
+        # 2. Одиночный документ — автоопределение любого известного или произвольного поля
+        priority_keys = [
+            "data", "db_data", "sqlite_db", "db_bytes", "db_b64",
+            "base64", "sqlite_base64", "content", "file", "payload", "db", "sqlite",
+        ]
+        checked = set()
+        for k in priority_keys + list(doc_dict.keys()):
+            if k in checked or k not in doc_dict:
+                continue
+            checked.add(k)
+            res = self._decode_sqlite_payload(doc_dict[k], compression_hint)
+            if res:
+                return res
+        return None
+
+    @staticmethod
+    def _count_local_users(path: Path) -> int:
+        if not path.exists():
+            return 0
+        try:
+            c = sqlite3.connect(path)
+            cnt = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            c.close()
+            return int(cnt)
+        except Exception:
+            return 0
+
     def download_db_on_startup(self) -> bool:
         """
-        Скачивает сохраненную base.db из Firebase Storage ПЕРЕД запуском базы.
-        Если база в облаке найдена — загружает ее, сохраняя всех игроков и кланы.
-        Если нет — возвращает False, чтобы создать новую базу.
+        Скачивает сохраненную base.db из Cloud Firestore (telegram_bot_data/sqlite_database) ПЕРЕД запуском базы.
+        Никогда не удаляет существующую базу в Firestore при ошибке.
         """
         if not self.init_app():
+            self._startup_download_error = True
             return False
 
         try:
-            blob = self.bucket.blob("base.db")
-            if not blob.exists():
-                log.info("[Firebase] ℹ️ Файл base.db в облаке пока не создан. Будет инициализирована новая база.")
-                self.last_sync_status = "База еще не выгружалась в облако"
+            doc_ref = self.db.collection(self.collection_name).document(self.document_name)
+            doc = doc_ref.get()
+            if not doc.exists:
+                log.info(f"[Firestore] ℹ️ Документ {self.collection_name}/{self.document_name} пока не создан. Будет инициализирована новая база.")
+                self.last_sync_status = "База еще не выгружалась в Firestore"
+                self._cloud_doc_missing = True
+                self._startup_download_error = False
                 return False
 
-            blob.reload()
-            remote_size = blob.size or 0
-            if remote_size < 100:
-                log.warning(f"[Firebase] ⚠️ Удаленный base.db подозрительно мал ({remote_size} байт). Пропуск скачивания.")
+            self._cloud_doc_missing = False
+            doc_dict = doc.to_dict() or {}
+            sqlite_bytes = self._extract_sqlite_from_doc(doc_ref, doc_dict)
+            if not sqlite_bytes or len(sqlite_bytes) < 100:
+                log.warning("[Firestore] ⚠️ Документ существует, но не содержит корректных данных SQLite. Облако защищено от перезаписи.")
+                self.last_sync_status = "Ошибка: неверный формат данных в Firestore"
+                self._startup_download_error = True
                 return False
 
             tmp_path = BASE_DIR / "base.db.tmp_download"
-            log.info(f"[Firebase] 📥 Найдена сохраненная база в облаке ({remote_size:,} байт). Скачивание...")
-            blob.download_to_filename(str(tmp_path))
+            tmp_path.write_bytes(sqlite_bytes)
 
             if not self.is_valid_sqlite(tmp_path):
-                log.error("[Firebase] ❌ Скачанный файл поврежден. Отмена замены базы.")
+                log.error("[Firestore] ❌ Скачанный файл поврежден. Отмена замены базы.")
                 if tmp_path.exists():
                     tmp_path.unlink()
+                self._startup_download_error = True
                 return False
 
             if DB_PATH.exists():
@@ -238,36 +429,59 @@ class FirebaseStorageManager:
                     pass
 
             shutil.move(tmp_path, DB_PATH)
+            remote_size = len(sqlite_bytes)
             self.last_sync_ts = time.time()
             self.last_sync_size = remote_size
-            self.last_sync_status = f"Восстановлена из облака ({remote_size:,} байт)"
-            log.info(f"[Firebase] ✅ База base.db успешно восстановлена из Firebase Storage! Игроки и кланы сохранены.")
+            self.last_error = ""
+            self._startup_download_error = False
+            self.last_sync_status = f"Восстановлена из Firestore ({remote_size:,} байт)"
+            log.info(f"[Firestore] ✅ База base.db успешно восстановлена из {self.collection_name}/{self.document_name} ({remote_size:,} байт)!")
             return True
         except Exception as e:
-            log.error(f"[Firebase] Ошибка при скачивании base.db: {e}")
-            self.last_sync_status = f"Ошибка скачивания: {e}"
+            err_txt = self._format_error(e)
+            log.error(f"[Firestore] Ошибка при скачивании base.db: {err_txt}")
+            self.last_error = err_txt
+            self.last_sync_status = f"Ошибка скачивания: {err_txt}"
+            self._startup_download_error = True
             return False
 
     def upload_db_to_cloud(self, force: bool = False) -> bool:
         """
-        Выгружает локальный base.db в Firebase Storage.
-        СТРОГАЯ ЗАЩИТА: Ни в коем случае не перезаписывает облако пустым или поврежденным файлом.
+        Выгружает локальный base.db в Cloud Firestore (telegram_bot_data/sqlite_database).
+        СТРОГАЯ ЗАЩИТА: Ни в коем случае не перезаписывает облако пустой или поврежденной базой,
+        а также не перезаписывает существующий документ при ошибке скачивания на старте.
         """
         if not self.init_app():
             return False
 
         with self._lock:
             try:
+                if self._startup_download_error:
+                    log.warning("[Firestore] 🛑 Защита Anti-Wipe: при старте была ошибка чтения облака, выгрузка заблокирована для защиты базы.")
+                    self.last_error = "Anti-Wipe: сначала восстановите/проверьте чтение из Firestore"
+                    return False
+
                 if not DB_PATH.exists() or DB_PATH.stat().st_size < 100:
-                    log.warning("[Firebase] 🛑 Отмена выгрузки: локальный base.db пуст или не существует. Защита от очистки активна!")
+                    log.warning("[Firestore] 🛑 Отмена выгрузки: локальный base.db пуст или не существует. Защита от очистки активна!")
                     return False
 
                 if not self.is_valid_sqlite(DB_PATH):
-                    log.error("[Firebase] 🛑 Отмена выгрузки: локальный base.db поврежден. Облако защищено от затирания.")
+                    log.error("[Firestore] 🛑 Отмена выгрузки: локальный base.db поврежден. Облако защищено от затирания.")
                     return False
 
-                current_size = DB_PATH.stat().st_size
+                doc_ref = self.db.collection(self.collection_name).document(self.document_name)
 
+                # Дополнительная защита: если локально 0 пользователей, а в Firestore уже есть документ — не затираем!
+                if self._count_local_users(DB_PATH) == 0:
+                    existing_snap = doc_ref.get()
+                    if existing_snap.exists:
+                        existing_bytes = self._extract_sqlite_from_doc(doc_ref, existing_snap.to_dict() or {})
+                        if existing_bytes and len(existing_bytes) > 100:
+                            log.warning("[Firestore] 🛑 Anti-Wipe: локальная база содержит 0 игроков, а в облаке уже есть данные. Отмена перезаписи!")
+                            self.last_error = "Anti-Wipe: локальная база пуста (0 игроков), облако защищено!"
+                            return False
+
+                current_size = DB_PATH.stat().st_size
                 if not force and self.last_sync_ts > 0 and (time.time() - self.last_sync_ts < 15):
                     return True
 
@@ -282,8 +496,10 @@ class FirebaseStorageManager:
                 except Exception:
                     target_file = DB_PATH
 
-                blob = self.bucket.blob("base.db")
-                blob.upload_from_filename(str(target_file), content_type="application/x-sqlite3")
+                raw_bytes = Path(target_file).read_bytes()
+                current_size = len(raw_bytes)
+                compressed = zlib.compress(raw_bytes, level=6)
+                now_ts = int(time.time())
 
                 if snapshot_path.exists():
                     try:
@@ -291,15 +507,54 @@ class FirebaseStorageManager:
                     except Exception:
                         pass
 
+                # Firestore ограничивает размер одного документа ~1 МБ (1,048,576 байт)
+                if len(compressed) <= 900_000:
+                    doc_ref.set({
+                        "data": compressed,
+                        "compression": "zlib",
+                        "raw_size": current_size,
+                        "compressed_size": len(compressed),
+                        "chunked": False,
+                        "chunk_count": 0,
+                        "updated_ts": now_ts,
+                    })
+                else:
+                    chunk_size = 700_000
+                    chunks = [compressed[i : i + chunk_size] for i in range(0, len(compressed), chunk_size)]
+                    chunks_col = doc_ref.collection("chunks")
+                    for idx, chunk_bytes in enumerate(chunks):
+                        chunks_col.document(f"chunk_{idx}").set({
+                            "index": idx,
+                            "data": chunk_bytes,
+                        })
+                    # Удаляем лишние старые чанки, если база уменьшилась
+                    for old_doc in chunks_col.stream():
+                        m = re.search(r"(\d+)$", old_doc.id)
+                        if m and int(m.group(1)) >= len(chunks):
+                            old_doc.reference.delete()
+                    doc_ref.set({
+                        "compression": "zlib",
+                        "raw_size": current_size,
+                        "compressed_size": len(compressed),
+                        "chunked": True,
+                        "chunk_count": len(chunks),
+                        "updated_ts": now_ts,
+                    })
+
                 self.last_sync_ts = time.time()
                 self.last_sync_size = current_size
+                self.last_error = ""
+                self._startup_download_error = False
+                self._cloud_doc_missing = False
                 self.last_sync_status = f"Синхронизировано в {datetime.datetime.now().strftime('%H:%M:%S')} ({current_size:,} байт)"
                 self._dirty = False
-                log.info(f"[Firebase] ☁️ База base.db успешно выгружена в Firebase Storage ({current_size:,} байт)")
+                log.info(f"[Firestore] ☁️ База base.db сохранена в {self.collection_name}/{self.document_name} ({current_size:,} байт, сжато до {len(compressed):,} байт)")
                 return True
             except Exception as e:
-                log.error(f"[Firebase] Ошибка выгрузки base.db: {e}")
-                self.last_sync_status = f"Ошибка выгрузки: {e}"
+                err_txt = self._format_error(e)
+                log.error(f"[Firestore] Ошибка выгрузки base.db: {err_txt}")
+                self.last_error = err_txt
+                self.last_sync_status = f"Ошибка выгрузки: {err_txt}"
                 return False
 
     def schedule_sync(self):
@@ -319,22 +574,22 @@ class FirebaseStorageManager:
                 try:
                     self.upload_db_to_cloud(force=False)
                 except Exception as e:
-                    log.error(f"[Firebase Worker] Ошибка: {e}")
+                    log.error(f"[Firestore Worker] Ошибка: {e}")
 
-        self._sync_thread = threading.Thread(target=_worker, daemon=True, name="FirebaseSyncWorker")
+        self._sync_thread = threading.Thread(target=_worker, daemon=True, name="FirestoreSyncWorker")
         self._sync_thread.start()
-        log.info(f"[Firebase] Фоновая синхронизация базы активирована (интервал: {interval_seconds} сек)")
+        log.info(f"[Firestore] Фоновая синхронизация базы активирована (интервал: {interval_seconds} сек)")
 
     def stop(self):
         self._stop_event.set()
         if self.initialized:
-            self.upload_db_to_cloud(force=True)
+            self.upload_db_to_cloud(force=False)
 
 firebase_manager = FirebaseStorageManager()
 
 def _on_shutdown():
     try:
-        firebase_manager.upload_db_to_cloud(force=True)
+        firebase_manager.upload_db_to_cloud(force=False)
     except Exception:
         pass
 
@@ -359,7 +614,8 @@ atexit.register(_on_shutdown)
     WAIT_CLAN_DONATE_STARS,
     WAIT_MARKET_OFFER_PRICE,
     WAIT_GIFT_TRANSFER_USER,
-) = range(17)
+    WAIT_ADMIN_FIREBASE_KEY,
+) = range(18)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -3743,13 +3999,20 @@ async def show_admin_panel(query) -> None:
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-async def show_admin_firebase_menu(query) -> None:
-    status_icon = "🟢" if FIREBASE_ADMIN_AVAILABLE and firebase_manager.initialized else ("🟡" if FIREBASE_ADMIN_AVAILABLE else "⚠️")
-    status_msg = (
-        "Подключено к Firebase Storage" if FIREBASE_ADMIN_AVAILABLE and firebase_manager.initialized
-        else "SDK доступен (готов к синхронизации)" if FIREBASE_ADMIN_AVAILABLE
-        else "Библиотека firebase-admin не найдена (pip install firebase-admin)"
-    )
+async def show_admin_firebase_menu(query_or_msg) -> None:
+    has_err = bool(firebase_manager.last_error) or ("Ошибка" in firebase_manager.last_sync_status)
+    if not FIREBASE_ADMIN_AVAILABLE:
+        status_icon = "⚠️"
+        status_msg = "Библиотека firebase-admin не найдена (pip install firebase-admin)"
+    elif has_err:
+        status_icon = "🔴"
+        status_msg = "Ошибка авторизации / ключа Firebase"
+    elif firebase_manager.initialized:
+        status_icon = "🟢"
+        status_msg = "Подключено к Cloud Firestore (100% бесплатно)"
+    else:
+        status_icon = "🟡"
+        status_msg = "SDK доступен (готов к синхронизации)"
 
     db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
     if firebase_manager.last_sync_ts > 0:
@@ -3759,31 +4022,105 @@ async def show_admin_firebase_menu(query) -> None:
         ago_str = "еще не производилась"
 
     text = (
-        "☁️ <b>Управление облачной базой Firebase</b>\n"
+        "☁️ <b>Управление облачной базой Firebase Firestore</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"• Проект: <b>proar-5a642</b>\n"
-        f"• Бакет: <code>{firebase_manager.bucket_name}</code>\n"
-        f"• Облачный файл: <b>base.db</b>\n"
-        f"• Статус SDK: {status_icon} <b>{status_msg}</b>\n"
+        f"• Проект: <b>{clean_html(firebase_manager.project_id)}</b>\n"
+        f"• Коллекция: <code>{clean_html(firebase_manager.collection_name)}</code>\n"
+        f"• Документ: <code>{clean_html(firebase_manager.document_name)}</code>\n"
+        f"• Статус: {status_icon} <b>{clean_html(status_msg)}</b>\n"
         f"• Локальная база: <b>{db_size:,} байт</b>\n"
-        f"• Синхронизация: <b>{firebase_manager.last_sync_status}</b> ({ago_str})\n"
+        f"• Синхронизация: <b>{clean_html(firebase_manager.last_sync_status)}</b> ({ago_str})\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🛡️ <b>Защита от очистки базы (Anti-Wipe):</b>\n"
-        "Бот сначала скачивает сохраненную базу из облака при старте на bot host.ru. "
+        "Бот сначала скачивает сохраненную базу из Firestore при старте на bot host.ru. "
         "Пустая база никогда не затирает облачные данные игроков и кланов!\n"
     )
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Выгрузить в облако сейчас", callback_data="admin_firebase_sync")],
         [InlineKeyboardButton("📥 Восстановить из облака", callback_data="admin_firebase_restore")],
+        [InlineKeyboardButton("🔑 Загрузить ключ Firebase (.json)", callback_data="admin_firebase_key_start")],
         [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
     ])
 
+    if hasattr(query_or_msg, "message") and query_or_msg.message:
+        if query_or_msg.message.photo:
+            await query_or_msg.message.delete()
+            await query_or_msg.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await query_or_msg.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await query_or_msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def admin_firebase_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Доступ запрещен!", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+
+    text = (
+        "🔑 <b>Обновление сервисного ключа Firebase (.json)</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Если возникает ошибка <code>Invalid JWT Signature</code>, значит старый ключ был отозван.\n\n"
+        "1. Откройте Firebase Console → Настройки проекта → <b>Сервисные аккаунты</b>.\n"
+        "2. Нажмите <b>Создать новый закрытый ключ</b> (скачается файл <code>.json</code>).\n"
+        "3. Отправьте этот <b>.json файл</b> сюда (или вставьте его содержимое текстом)."
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_cancel")]])
     if query.message.photo:
         await query.message.delete()
         await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WAIT_ADMIN_FIREBASE_KEY
+
+async def admin_firebase_key_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    raw_json_str = ""
+    if update.message.document:
+        doc_file = await update.message.document.get_file()
+        bio = io.BytesIO()
+        await doc_file.download_to_memory(bio)
+        raw_json_str = bio.getvalue().decode("utf-8", errors="replace")
+    elif update.message.text:
+        raw_json_str = update.message.text.strip()
+
+    try:
+        cred_dict = json.loads(raw_json_str)
+        if not isinstance(cred_dict, dict) or "private_key" not in cred_dict or "client_email" not in cred_dict:
+            raise ValueError("Нет полей private_key / client_email")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Некорректный JSON-ключ ({clean_html(str(e))}). Отправьте правильный файл .json из Firebase Console:")
+        return WAIT_ADMIN_FIREBASE_KEY
+
+    key_path = BASE_DIR / "firebase-service-account.json"
+    key_path.write_text(json.dumps(cred_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    ok = firebase_manager.reinit()
+    if ok:
+        restored = firebase_manager.download_db_on_startup()
+        if restored:
+            db_init()
+            msg = "✅ Ключ сохранён! Подключение к Cloud Firestore успешно, база восстановлена из облака без потерь."
+        elif firebase_manager._cloud_doc_missing:
+            msg = "✅ Ключ сохранён! Подключение к Cloud Firestore успешно (в облаке пока нет сохранённой базы)."
+        else:
+            msg = f"⚠️ Ключ сохранён, но при проверке облака возникла ошибка: {clean_html(firebase_manager.last_sync_status)}"
+    else:
+        msg = f"❌ Ключ сохранён, но подключиться не удалось: {clean_html(firebase_manager.last_sync_status)}"
+
+    await update.message.reply_text(
+        msg,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("☁️ Меню Firebase", callback_data="admin_firebase_menu")],
+            [InlineKeyboardButton("👑 В админ-панель", callback_data="admin_panel")],
+        ]),
+    )
+    return ConversationHandler.END
 
 # --- БАН ИГРОКА (FSM) ---
 
@@ -5049,12 +5386,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if user.id not in ADMIN_IDS:
             await query.answer("❌ Доступ запрещен!", show_alert=True)
             return
-        await query.answer("⏳ Выгрузка base.db в Firebase Storage...")
         ok = firebase_manager.upload_db_to_cloud(force=True)
         if ok:
-            await query.answer("✅ База base.db успешно выгружена в Firebase Storage!", show_alert=True)
+            await query.answer("✅ База base.db успешно выгружена в Cloud Firestore!", show_alert=True)
         else:
-            await query.answer("❌ Ошибка синхронизации. Проверьте pip install firebase-admin или логи.", show_alert=True)
+            err_msg = f"❌ {firebase_manager.last_error or 'Ошибка синхронизации!'}"
+            await query.answer(err_msg[:190], show_alert=True)
         await show_admin_firebase_menu(query)
         return
 
@@ -5062,12 +5399,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if user.id not in ADMIN_IDS:
             await query.answer("❌ Доступ запрещен!", show_alert=True)
             return
-        await query.answer("⏳ Скачивание базы из Firebase...")
         ok = firebase_manager.download_db_on_startup()
         if ok:
-            await query.answer("📥 База base.db успешно восстановлена из облака!", show_alert=True)
+            db_init()
+            await query.answer("📥 База base.db успешно восстановлена из Cloud Firestore!", show_alert=True)
         else:
-            await query.answer("❌ Не удалось восстановить базу. Возможно, файла еще нет в облаке.", show_alert=True)
+            err_msg = f"❌ {firebase_manager.last_error or 'Не удалось восстановить базу из Firestore.'}"
+            await query.answer(err_msg[:190], show_alert=True)
         await show_admin_firebase_menu(query)
         return
 
@@ -5966,23 +6304,23 @@ async def cmd_send_gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # 1. Попытка восстановить сохраненную базу base.db из Firebase Storage ПЕРЕД запуском
+    # 1. Попытка восстановить сохраненную базу base.db из Cloud Firestore ПЕРЕД запуском
     # Защищает данные игроков и кланов от удаления при перезапуске на bot host.ru
     db_restored = False
     try:
         db_restored = firebase_manager.download_db_on_startup()
     except Exception as e:
-        log.error(f"[Firebase] Ошибка скачивания базы при старте: {e}")
+        log.error(f"[Firestore] Ошибка скачивания базы при старте: {e}")
 
-    # 2. Инициализация локальной базы SQLite и миграция таблиц
+    # 2. Инициализация локальной базы SQLite и миграция таблиц (без затирания существующих данных)
     db_init()
 
-    # 3. Если базы в облаке еще не было, выгружаем свежесозданную базу в Firebase
-    if not db_restored:
+    # 3. Выгружаем в Firestore при старте ТОЛЬКО если документа в облаке ещё не было (и не было ошибки загрузки!)
+    if not db_restored and firebase_manager._cloud_doc_missing and not firebase_manager._startup_download_error:
         try:
             firebase_manager.upload_db_to_cloud(force=True)
         except Exception as e:
-            log.error(f"[Firebase] Ошибка первой выгрузки базы в облако: {e}")
+            log.error(f"[Firestore] Ошибка первой выгрузки базы в облако: {e}")
 
     # 4. Запускаем периодическую фоновую синхронизацию базы (каждые 60 сек)
     firebase_manager.start_periodic_sync(interval_seconds=60)
@@ -6143,6 +6481,23 @@ def main() -> None:
         allow_reentry=True,
     )
 
+    # 11. FSM Загрузки нового ключа Firebase (.json)
+    admin_firebase_key_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_firebase_key_start, pattern="^admin_firebase_key_start$")],
+        states={
+            WAIT_ADMIN_FIREBASE_KEY: [
+                MessageHandler(filters.Document.ALL | (filters.TEXT & ~filters.COMMAND), admin_firebase_key_received),
+                CallbackQueryHandler(admin_cancel, pattern="^admin_cancel$"),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", admin_cancel),
+            CallbackQueryHandler(admin_cancel, pattern="^admin_cancel$"),
+        ],
+        per_message=False,
+        allow_reentry=True,
+    )
+
     app.add_handler(clan_conv)
     app.add_handler(admin_give_stars_conv)
     app.add_handler(admin_give_nft_conv)
@@ -6153,6 +6508,7 @@ def main() -> None:
     app.add_handler(bg_conv)
     app.add_handler(market_offer_conv)
     app.add_handler(gift_transfer_conv)
+    app.add_handler(admin_firebase_key_conv)
 
     # Команды
     app.add_handler(CommandHandler("start", cmd_start))
